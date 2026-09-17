@@ -1,0 +1,17 @@
+[project]
+name = "cpythonizer"
+version = "0.1.0"
+description = "Python 3.14 -> C (Python.h) -> MSVC /MT standalone builder"
+requires-python = "==3.14.*"
+readme = "README.md"
+
+[project.scripts]
+cpythonizer = "cpythonizer.cli:main"
+
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["cpythonizer*"]
