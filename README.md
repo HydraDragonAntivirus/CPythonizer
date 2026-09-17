@@ -55,3 +55,17 @@ but **no bytecode, no source logic, no constants can be reconstructed** — the 
 code is native machine code produced by MSVC. Static decompilers (Hexpyrion-style)
 get nothing at all, since there is no frozen `.pyc` to extract — unlike Nuitka
 onefiles, which ship recoverable bytecode.
+
+Even this **library-free minimal build is already hard to reverse**: there is no
+embedded `.py`, no bytecode header, no `co_code` to carve — only MSVC-compiled
+machine code plus metadata stubs. A reverser is reduced to plain native
+reverse engineering (IDA/x64dbg level), with zero Python semantics to latch onto.
+
+Add any real **library and it becomes a nightmare**: each dependency (e.g. `requests`,
+`numpy`, `cryptography`) is itself transpiled into thousands of additional Cython
+functions inside the same binary. The module list explodes, control flow is buried
+under generated `__pyx_` helpers, error paths and type dispatchers — while still
+yielding **zero bytecode**. What was one small stub table becomes tens of thousands
+of native functions with inlined, optimized logic. Automated Python tooling stays
+blind; manual analysis must fight through MSVC-optimized (`/O2` + LTCG) machine
+code with no source-level landmarks.
