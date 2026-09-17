@@ -5,12 +5,15 @@ Flow:
   2. A .vcxproj + .sln wrapping that C file is generated.
   3. MSBuild (Visual Studio 2022) compiles it to EXE.
   4. Visual Studio auto-generates the debug binaries (PDB) via /Zi + /DEBUG.
+  5. The stdlib is staged as python314.zip + extension .pyd files next to
+     the EXE, so the app boots on a PC with no Python installed.
 """
 from __future__ import annotations
 
 import shutil
 import subprocess
 import uuid
+import zipfile
 from pathlib import Path
 
 
@@ -238,4 +241,56 @@ def build(entry: str | Path, name: str | None = None, dist: str | Path = "dist",
     for dll in dev.runtime_dlls():
         shutil.copy2(dll, out_dir / dll.name)
         print(f"  + {dll.name} (runtime copy)")
+
+    # 5) Stdlib + extension modules so the EXE boots on a bare PC.
+    stage_stdlib(dev, out_dir)
     return exe
+
+
+def stage_stdlib(dev, out_dir: Path) -> None:
+    """Stage python314.zip (Lib) and .pyd/.dll files next to the EXE.
+
+    A Cython --embed EXE derives its module search path from its own
+    folder (like the official embeddable package): it looks for
+    <exe_dir>/python314.zip, then <exe_dir>/Lib. Without one of those,
+    startup fails with "Could not find platform independent libraries".
+    """
+    from .python_env import PyDev  # noqa: F401  (type hint only)
+
+    lib_root: Path = dev.lib_dir
+    zip_name = f"python{dev.ver}.zip"  # e.g. python314.zip
+    zip_path = out_dir / zip_name
+
+    # Zip the whole Lib/ except tests, caches and idle tooling.
+    skip_dirs = {"__pycache__", "test", "tests", "idlelib", "turtledemo"}
+    skip_suffix = (".pyc", ".pyo", ".pdb", ".lib")
+    count = 0
+    with zipfile.ZipFile(zip_path, "w", zipfile.ZIP_DEFLATED, compresslevel=6) as zf:
+        for src in sorted(lib_root.rglob("*")):
+            if not src.is_file():
+                continue
+            if src.suffix in skip_suffix:
+                continue
+            rel = src.relative_to(lib_root)
+            if any(part in skip_dirs for part in rel.parts):
+                continue
+            zf.write(src, rel.as_posix())
+            count += 1
+    print(f"  + {zip_name} ({count} stdlib files, {zip_path.stat().st_size // 1024} KB)")
+
+    # Extension modules (*.pyd) live in DLLs/; copy them beside the EXE
+    # exactly like the official embeddable package does.
+    dlls_src: Path = dev.dlls_dir
+    pyd_count = 0
+    if dlls_src.is_dir():
+        for pyd in sorted(dlls_src.glob("*.pyd")):
+            shutil.copy2(pyd, out_dir / pyd.name)
+            pyd_count += 1
+        # Native support DLLs used by ssl/hashlib/ffi/sqlite extensions.
+        for extra in ("libcrypto-3.dll", "libssl-3.dll", "libffi-8.dll", "sqlite3.dll"):
+            src = dlls_src / extra
+            if src.is_file():
+                shutil.copy2(src, out_dir / extra)
+    # Tcl/Tk data folders (only needed when tkinter is used, cheap to skip
+    # otherwise; kept out to avoid bloat).
+    print(f"  + {pyd_count} extension modules (.pyd)")
