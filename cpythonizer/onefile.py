@@ -472,6 +472,10 @@ int wmain(int argc, wchar_t **argv)
         wc_append(cmdline, 4096, &len, argv[i]);
     }
 
+    /* Pass temp folder via environment variables for PyInstaller compatibility. */
+    SetEnvironmentVariableW(L"CPYTHONIZER_TEMP", tmpdir);
+    SetEnvironmentVariableW(L"_MEIPASS", tmpdir);
+
     memset(&si, 0, sizeof si);
     si.cb = sizeof si;
     memset(&pi, 0, sizeof pi);
