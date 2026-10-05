@@ -15,10 +15,34 @@
 4. The stdlib is staged as `python314.zip` plus the required `.pyd`/`.dll` files next to the EXE, so it boots on a PC with no Python installed. No Debug CRT (`*_d.pyd`) is ever shipped.
 
 ```
-python -m cpythonizer vs-build examples/single_hello.py --name Hello --dist dist
+python -m cpythonizer vs-build examples/single_hello.py --name Hello --dist dist --onefile
 ```
 
-Pin a specific Visual Studio version with `--vs 2026` or `--vs 2022` (default: newest installed).
+Options:
+- `--onefile`: Folds the program, runtime (`python314.dll`), stdlib (`python314.zip`), and extension modules into a single self-contained `.exe` (see below).
+- `--embed` / `--no-embed`: Generate standalone `main()` entrypoint via `cython --embed` (default: enabled).
+- `--vs 2026` / `--vs 2022`: Pin a specific Visual Studio version (default: `auto` = newest installed).
+
+### Onefile Internals
+The onefile EXE is `[ stub ][ payload ZIP ][ 16-byte trailer ]`, where the trailer is
+`CPYONE1` + the payload size. The stub is generated Win32 C (`build/…/<app>_stub.c`,
+`/MT`, no Python dependency at all); the payload is the ordinary `cython --embed` +
+MSVC build, stored **uncompressed** because it is already-compressed `.pyd`/`.dll`/`.zip`
+data — the stub needs no inflate, only local-header parsing.
+
+On startup the stub creates `%TEMP%\<app>-<8 random hex>\`, unpacks the payload there,
+runs the program from it under its **original name**, waits for it, deletes the folder and
+exits with the program's own exit code:
+
+```text
+tasklist  ->  Hello.exe   (never the temp path)
+sys.argv[0] / sys.executable  ->  C:\...\Hello.exe
+```
+
+The command line is forwarded verbatim, `argv[0]` is rewritten to the shipped EXE, and the
+working directory is left alone. Unpacking ~29 MB costs about 0.25 s per launch.
+Debug switches: `CPYTHONIZER_ONEFILE_VERBOSE=1` prints the temp folder, and
+`--cpythonizer-keep` (or `CPYTHONIZER_ONEFILE_KEEP=1`) keeps it for inspection.
 
 ### Proof: Better Than Nuitka (Decompiler Test)
 A memory-dump / hook-based Python decompiler

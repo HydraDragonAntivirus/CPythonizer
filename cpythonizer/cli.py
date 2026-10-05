@@ -49,7 +49,14 @@ def cmd_vs_build(args: argparse.Namespace) -> int:
     """Cython-transpile to C, wrap in a VS project, compile with MSBuild."""
     from .cython_vs import build as vs_build
 
-    out = vs_build(entry=args.entry, name=args.name, dist=args.dist, vs=args.vs)
+    out = vs_build(
+        entry=args.entry,
+        name=args.name,
+        dist=args.dist,
+        vs=args.vs,
+        embed=getattr(args, "embed", True),
+        onefile=getattr(args, "onefile", False),
+    )
     print(out)
     return 0
 
@@ -75,6 +82,10 @@ def build_parser() -> argparse.ArgumentParser:
     v.add_argument("--dist", default="dist", help="Output root folder (default: dist)")
     v.add_argument("--vs", default="auto", choices=_vs_choices(),
                    help="Visual Studio version to build with (default: auto = newest installed)")
+    v.add_argument("--embed", action=argparse.BooleanOptionalAction, default=True,
+                   help="Generate embedded main() entrypoint via cython --embed (default: True)")
+    v.add_argument("--onefile", action="store_true",
+                   help="Ship one self-extracting EXE: unpacks to a random %%TEMP%% folder, runs under its original name, cleans up")
     v.set_defaults(func=cmd_vs_build)
     return p
 
