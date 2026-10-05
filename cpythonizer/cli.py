@@ -56,6 +56,8 @@ def cmd_vs_build(args: argparse.Namespace) -> int:
         vs=args.vs,
         embed=getattr(args, "embed", True),
         onefile=getattr(args, "onefile", False),
+        icon=getattr(args, "icon", None),
+        include_packages=getattr(args, "include_packages", None),
     )
     print(out)
     return 0
@@ -86,6 +88,10 @@ def build_parser() -> argparse.ArgumentParser:
                    help="Generate embedded main() entrypoint via cython --embed (default: True)")
     v.add_argument("--onefile", action="store_true",
                    help="Ship one self-extracting EXE: unpacks to a random %%TEMP%% folder, runs under its original name, cleans up")
+    v.add_argument("--icon", default=None,
+                   help="Application icon file (.ico or .png; PNG files are converted automatically)")
+    v.add_argument("--include-package", "--package", dest="include_packages", action="append", default=[],
+                   help="Third-party package to include (e.g. --include-package requests)")
     v.set_defaults(func=cmd_vs_build)
     return p
 

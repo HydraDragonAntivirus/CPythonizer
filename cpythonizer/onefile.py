@@ -267,6 +267,10 @@ static int extract_payload(HANDLE self, ULONGLONG start, ULONGLONG size,
             return 0;
         }
         name[i] = L'\0';
+        for (unsigned k = 0; k < i; k++) {
+            if (name[k] == L'/')
+                name[k] = L'\\';
+        }
         if (wcsstr(name, L"..") != NULL) {
             fail(L"unsafe path in payload");
             free(chunk);
@@ -551,6 +555,7 @@ STUB_VCXPROJ_TEMPLATE = """<?xml version="1.0" encoding="utf-8"?>
   </ItemDefinitionGroup>
   <ItemGroup>
     <ClCompile Include="{CFILE}" />
+{RESOURCE_ITEM}
   </ItemGroup>
   <Import Project="$(VCTargetsPath)\\Microsoft.Cpp.targets" />
   <ImportGroup Label="ExtensionTargets" />
@@ -567,11 +572,12 @@ def write_stub_c(work: Path, app_name: str) -> Path:
 
 
 def build_stub(work: Path, app_name: str, out_dir: Path, release,
-               msbuild: Path) -> tuple[Path, Path | None]:
+               msbuild: Path, rc_file: Path | None = None) -> tuple[Path, Path | None]:
     """Compile the stub. Returns (stub_exe, stub_pdb)."""
     guid = str(uuid.uuid4()).upper()
     c_file = write_stub_c(work, app_name)
     name = f"{app_name}_stub"
+    resource_item = f'    <ResourceCompile Include="{rc_file.name}" />' if rc_file else ""
     proj = STUB_VCXPROJ_TEMPLATE.format(
         GUID="{" + guid + "}",
         NAME=name,
@@ -580,6 +586,7 @@ def build_stub(work: Path, app_name: str, out_dir: Path, release,
         OUTDIR=str(out_dir),
         INTDIR=str(work / "obj_stub"),
         CFILE=str(c_file),
+        RESOURCE_ITEM=resource_item,
     )
     (work / f"{name}.vcxproj").write_text(proj, encoding="utf-8")
     sln = work / f"{name}.sln"
@@ -644,7 +651,7 @@ def verify(exe: Path) -> bool:
 
 
 def assemble(stage: Path, app_name: str, work: Path, msbuild: Path, release,
-             out_exe: Path) -> Path:
+             out_exe: Path, icon: Path | None = None) -> Path:
     """Fold the staged program + runtime into one self-extracting EXE."""
     if not (stage / f"{app_name}.exe").is_file():
         raise FileNotFoundError(f"Staged program missing: {stage / f'{app_name}.exe'}")
@@ -653,7 +660,14 @@ def assemble(stage: Path, app_name: str, work: Path, msbuild: Path, release,
     if stub_dir.exists():
         shutil.rmtree(stub_dir, ignore_errors=True)
     stub_dir.mkdir(parents=True, exist_ok=True)
-    stub_exe, stub_pdb = build_stub(work, app_name, stub_dir, release, msbuild)
+
+    stub_rc = None
+    if icon is not None and icon.is_file():
+        stub_rc = work / f"{app_name}_stub.rc"
+        # Relative to work directory where .vcxproj lives
+        stub_rc.write_text(f'1 ICON "{icon.name}"\n', encoding="utf-8")
+
+    stub_exe, stub_pdb = build_stub(work, app_name, stub_dir, release, msbuild, rc_file=stub_rc)
 
     payload = work / "payload.zip"
     files, size = make_payload(stage, payload)

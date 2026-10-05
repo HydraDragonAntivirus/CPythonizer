@@ -19,8 +19,10 @@ python -m cpythonizer vs-build examples/single_hello.py --name Hello --dist dist
 ```
 
 Options:
-- `--onefile`: Folds the program, runtime (`python314.dll`), stdlib (`python314.zip`), and extension modules into a single self-contained `.exe` (see below).
+- `--onefile`: Folds the program, runtime (`python314.dll`), stdlib (`python314.zip`), extension modules, and third-party packages into a single self-contained `.exe` (see below).
 - `--embed` / `--no-embed`: Generate standalone `main()` entrypoint via `cython --embed` (default: enabled).
+- `--icon <path>`: Executable icon (`.ico` or `.png`; PNG files are converted automatically).
+- `--include-package <name>`: Explicitly bundle a third-party package (third-party imports like `requests` are also detected and bundled automatically).
 - `--vs 2026` / `--vs 2022`: Pin a specific Visual Studio version (default: `auto` = newest installed).
 
 ### Onefile Internals
