@@ -405,11 +405,19 @@ def stage_stdlib(dev, out_dir: Path) -> None:
                 continue
             shutil.copy2(pyd, out_dir / pyd.name)
             pyd_count += 1
-        # Native support DLLs used by ssl/hashlib/ffi/sqlite extensions.
-        for extra in ("libcrypto-3.dll", "libssl-3.dll", "libffi-8.dll", "sqlite3.dll"):
-            src = dlls_src / extra
-            if src.is_file():
-                shutil.copy2(src, out_dir / extra)
-    # Tcl/Tk data folders (only needed when tkinter is used, cheap to skip
-    # otherwise; kept out to avoid bloat).
+        # Native support DLLs used by extensions (ssl, ffi, sqlite, tcl, tk, zlib, etc.)
+        for dll in sorted(dlls_src.glob("*.dll")):
+            stem = dll.stem.lower()
+            if stem.endswith("_d") or "test" in stem:
+                continue
+            shutil.copy2(dll, out_dir / dll.name)
+
+    # Tcl/Tk data folders (required for _tkinter and Tkinter GUIs)
+    tcl_src = dev.base / "tcl"
+    if tcl_src.is_dir():
+        tcl_dest = out_dir / "tcl"
+        if not tcl_dest.exists():
+            shutil.copytree(tcl_src, tcl_dest, ignore=shutil.ignore_patterns("*.lib", "*.sh"))
+        print("  + tcl runtime data folder")
+
     print(f"  + {pyd_count} extension modules (.pyd)")
