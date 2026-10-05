@@ -535,22 +535,22 @@ STUB_VCXPROJ_TEMPLATE = """<?xml version="1.0" encoding="utf-8"?>
     <OutDir>{OUTDIR}\\</OutDir>
     <IntDir>{INTDIR}\\</IntDir>
     <TargetName>{NAME}</TargetName>
-    <GenerateDebugInformation>true</GenerateDebugInformation>
+    <GenerateDebugInformation>{GENERATE_DEBUG}</GenerateDebugInformation>
   </PropertyGroup>
   <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Release|x64'">
     <ClCompile>
       <WarningLevel>Level3</WarningLevel>
       <Optimization>MaxSpeed</Optimization>
       <FunctionLevelLinking>true</FunctionLevelLinking>
-      <PreprocessorDefinitions>NDEBUG;_CONSOLE;%(PreprocessorDefinitions)</PreprocessorDefinitions>
+      <PreprocessorDefinitions>NDEBUG;{DEF_SUBSYSTEM};%(PreprocessorDefinitions)</PreprocessorDefinitions>
       <CompileAs>CompileAsC</CompileAs>
       <!-- Pure Win32 launcher: static CRT so the stub runs on a bare PC. -->
       <RuntimeLibrary>MultiThreaded</RuntimeLibrary>
-      <DebugInformationFormat>ProgramDatabase</DebugInformationFormat>
+      <DebugInformationFormat>{DEBUG_FORMAT}</DebugInformationFormat>
     </ClCompile>
     <Link>
-      <SubSystem>Console</SubSystem>
-      <GenerateDebugInformation>true</GenerateDebugInformation>
+      <SubSystem>{SUBSYSTEM}</SubSystem>
+      <GenerateDebugInformation>{GENERATE_DEBUG}</GenerateDebugInformation>
       <EnableCOMDATFolding>true</EnableCOMDATFolding>
       <OptimizeReferences>true</OptimizeReferences>
       <AdditionalDependencies>kernel32.lib;advapi32.lib;bcrypt.lib;%(AdditionalDependencies)</AdditionalDependencies>
@@ -576,12 +576,17 @@ def write_stub_c(work: Path, app_name: str) -> Path:
 
 
 def build_stub(work: Path, app_name: str, out_dir: Path, release,
-               msbuild: Path, rc_file: Path | None = None) -> tuple[Path, Path | None]:
+               msbuild: Path, rc_file: Path | None = None,
+               release_mode: bool = False, noconsole: bool = False) -> tuple[Path, Path | None]:
     """Compile the stub. Returns (stub_exe, stub_pdb)."""
     guid = str(uuid.uuid4()).upper()
     c_file = write_stub_c(work, app_name)
     name = f"{app_name}_stub"
     resource_item = f'    <ResourceCompile Include="{rc_file.name}" />' if rc_file else ""
+    subsystem = "Windows" if noconsole else "Console"
+    def_subsystem = "_WINDOWS" if noconsole else "_CONSOLE"
+    generate_debug = "false" if release_mode else "true"
+    debug_format = "None" if release_mode else "ProgramDatabase"
     proj = STUB_VCXPROJ_TEMPLATE.format(
         GUID="{" + guid + "}",
         NAME=name,
@@ -591,6 +596,10 @@ def build_stub(work: Path, app_name: str, out_dir: Path, release,
         INTDIR=str(work / "obj_stub"),
         CFILE=str(c_file),
         RESOURCE_ITEM=resource_item,
+        SUBSYSTEM=subsystem,
+        DEF_SUBSYSTEM=def_subsystem,
+        GENERATE_DEBUG=generate_debug,
+        DEBUG_FORMAT=debug_format,
     )
     (work / f"{name}.vcxproj").write_text(proj, encoding="utf-8")
     sln = work / f"{name}.sln"
@@ -599,13 +608,13 @@ def build_stub(work: Path, app_name: str, out_dir: Path, release,
                             SLN_MAJOR=release.major),
         encoding="utf-8",
     )
-    print(f"[cpythonizer] Building onefile stub ({release.label}): {c_file}")
+    print(f"[cpythonizer] Building onefile stub ({release.label}, {subsystem}): {c_file}")
     build_sln(msbuild, sln)
     exe = out_dir / f"{name}.exe"
     if not exe.is_file():
         raise RuntimeError(f"Stub build finished but EXE missing: {exe}")
     pdb = out_dir / f"{name}.pdb"
-    return exe, pdb if pdb.is_file() else None
+    return exe, pdb if pdb.is_file() and not release_mode else None
 
 
 def make_payload(stage: Path, out: Path) -> tuple[int, int]:
@@ -655,7 +664,8 @@ def verify(exe: Path) -> bool:
 
 
 def assemble(stage: Path, app_name: str, work: Path, msbuild: Path, release,
-             out_exe: Path, icon: Path | None = None) -> Path:
+             out_exe: Path, icon: Path | None = None,
+             release_mode: bool = False, noconsole: bool = False) -> Path:
     """Fold the staged program + runtime into one self-extracting EXE."""
     if not (stage / f"{app_name}.exe").is_file():
         raise FileNotFoundError(f"Staged program missing: {stage / f'{app_name}.exe'}")
@@ -671,7 +681,10 @@ def assemble(stage: Path, app_name: str, work: Path, msbuild: Path, release,
         # Relative to work directory where .vcxproj lives
         stub_rc.write_text(f'1 ICON "{icon.name}"\n', encoding="utf-8")
 
-    stub_exe, stub_pdb = build_stub(work, app_name, stub_dir, release, msbuild, rc_file=stub_rc)
+    stub_exe, stub_pdb = build_stub(
+        work, app_name, stub_dir, release, msbuild,
+        rc_file=stub_rc, release_mode=release_mode, noconsole=noconsole,
+    )
 
     payload = work / "payload.zip"
     files, size = make_payload(stage, payload)
@@ -680,11 +693,13 @@ def assemble(stage: Path, app_name: str, work: Path, msbuild: Path, release,
     exe = pack(stub_exe, payload, out_exe)
     if not verify(exe):
         raise RuntimeError(f"Packed onefile EXE failed its trailer check: {exe}")
-    if stub_pdb is not None:
+    if stub_pdb is not None and not release_mode:
         # Named apart on purpose: these are the stub's symbols, the program
         # itself keeps its own PDB inside the payload.
         shutil.copy2(stub_pdb, out_exe.with_name(f"{app_name}-stub.pdb"))
-    print(f"[cpythonizer] ONEFILE DONE ({release.label}):\n"
+    sub_str = " (Windowed / No Console)" if noconsole else ""
+    rel_str = " (Release)" if release_mode else ""
+    print(f"[cpythonizer] ONEFILE DONE ({release.label}{sub_str}{rel_str}):\n"
           f"  EXE: {exe} ({exe.stat().st_size // (1024 * 1024)} MB, runs alone)\n"
           "  At startup it unpacks into %TEMP%\\<app>-<random>\\ and cleans up after itself.")
     return exe
