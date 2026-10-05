@@ -21,6 +21,7 @@ python -m cpythonizer vs-build examples/single_hello.py --name Hello --dist dist
 Options:
 - `--onefile`: Folds the program, runtime (`python314.dll`), stdlib (`python314.zip`), extension modules, and third-party packages into a single self-contained `.exe` (see below).
 - `--release`: Strips debug symbols / PDB, enables max compiler optimizations, and applies Cython speedup directives.
+- `--keep-pdb`: Retains debug symbols (`.pdb`) even when building with `--release`.
 - `--noconsole` / `--windowed`: Windows GUI subsystem — hides the black console/CMD window at launch (for Tkinter, PyQt, etc.).
 - `--embed` / `--no-embed`: Generate standalone `main()` entrypoint via `cython --embed` (default: enabled).
 - `--icon <path>`: Executable icon (`.ico` or `.png`; PNG files are converted automatically).

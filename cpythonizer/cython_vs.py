@@ -219,7 +219,8 @@ EndGlobal
 def generate_vs_project(workdir: Path, app_name: str, c_file: Path,
                         include_dir: Path, lib_dir: Path, lib_name: str,
                         out_dir: Path, release=None, rc_file: Path | None = None,
-                        release_mode: bool = False, noconsole: bool = False) -> Path:
+                        release_mode: bool = False, noconsole: bool = False,
+                        keep_pdb: bool = False) -> Path:
     """Write .vcxproj + .sln into workdir. Returns the .sln path.
 
     The project is stamped for the targeted Visual Studio release, so the
@@ -234,8 +235,8 @@ def generate_vs_project(workdir: Path, app_name: str, c_file: Path,
     resource_item = f'    <ResourceCompile Include="{rc_file.name}" />' if rc_file else ""
     subsystem = "Windows" if noconsole else "Console"
     def_subsystem = "_WINDOWS" if noconsole else "_CONSOLE"
-    generate_debug = "false" if release_mode else "true"
-    debug_format = "None" if release_mode else "ProgramDatabase"
+    generate_debug = "true" if (keep_pdb or not release_mode) else "false"
+    debug_format = "ProgramDatabase" if (keep_pdb or not release_mode) else "None"
     proj = VCXPROJ_TEMPLATE.format(
         GUID="{" + guid + "}",
         NAME=app_name,
@@ -284,7 +285,8 @@ def build(entry: str | Path, name: str | None = None, dist: str | Path = "dist",
           python_exe: Path | None = None, embed: bool = True,
           onefile: bool = False, icon: str | Path | None = None,
           include_packages: list[str] | None = None,
-          release: bool = False, noconsole: bool = False) -> Path:
+          release: bool = False, noconsole: bool = False,
+          keep_pdb: bool = False) -> Path:
     """Full pipeline: Cython --embed -> .vcxproj/.sln -> MSBuild -> EXE+PDB.
 
     With onefile=True the program and its runtime are staged under build/ and
@@ -341,6 +343,7 @@ def build(entry: str | Path, name: str | None = None, dist: str | Path = "dist",
         rc_file=rc_file,
         release_mode=release,
         noconsole=noconsole,
+        keep_pdb=keep_pdb,
     )
 
     # 3) Compile with Visual Studio; PDB comes out automatically unless release mode.
@@ -350,10 +353,11 @@ def build(entry: str | Path, name: str | None = None, dist: str | Path = "dist",
     pdb = stage_dir / f"{app_name}.pdb"
     if not exe.is_file():
         raise RuntimeError(f"Build finished but EXE missing: {exe}")
-    if release:
-        print(f"[cpythonizer] Program built (Release / Optimized):\n  EXE: {exe}")
+    emit_debug = keep_pdb or (not release)
+    if emit_debug and pdb.is_file():
+        print(f"[cpythonizer] Program built:\n  EXE: {exe}\n  PDB: {pdb}")
     else:
-        print(f"[cpythonizer] Program built:\n  EXE: {exe}\n  PDB: {pdb if pdb.is_file() else 'MISSING!'}")
+        print(f"[cpythonizer] Program built (Release / Optimized):\n  EXE: {exe}")
 
     # 4) Required runtime copies next to the EXE (target PC has no Python).
     for dll in dev.runtime_dlls():
@@ -378,12 +382,13 @@ def build(entry: str | Path, name: str | None = None, dist: str | Path = "dist",
         from .onefile import assemble
         return assemble(stage_dir, app_name, work, msbuild, install.release,
                         out_dir / f"{app_name}.exe", icon=ico_file,
-                        release_mode=release, noconsole=noconsole)
+                        release_mode=release, noconsole=noconsole,
+                        keep_pdb=keep_pdb)
 
-    if release:
-        print(f"[cpythonizer] DONE (Release):\n  EXE: {exe}")
+    if emit_debug and pdb.is_file():
+        print(f"[cpythonizer] DONE:\n  EXE: {exe}\n  PDB: {pdb}")
     else:
-        print(f"[cpythonizer] DONE:\n  EXE: {exe}\n  PDB: {pdb if pdb.is_file() else 'MISSING!'}")
+        print(f"[cpythonizer] DONE (Release):\n  EXE: {exe}")
     return exe
 
 

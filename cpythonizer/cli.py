@@ -60,6 +60,7 @@ def cmd_vs_build(args: argparse.Namespace) -> int:
         include_packages=getattr(args, "include_packages", None),
         release=getattr(args, "release", False),
         noconsole=getattr(args, "noconsole", False),
+        keep_pdb=getattr(args, "keep_pdb", False),
     )
     print(out)
     return 0
@@ -96,6 +97,8 @@ def build_parser() -> argparse.ArgumentParser:
                    help="Third-party package to include (e.g. --include-package requests)")
     v.add_argument("--release", action="store_true", default=False,
                    help="Release build: strip debug symbols / PDB, apply max compiler optimizations and Cython speedups")
+    v.add_argument("--keep-pdb", action="store_true", default=False,
+                   help="Retain debug symbols (.pdb) even when building with --release")
     v.add_argument("--noconsole", "--windowed", dest="noconsole", action="store_true", default=False,
                    help="Hide the black console window at startup (for GUI apps like Tkinter, PyQt)")
     v.set_defaults(func=cmd_vs_build)

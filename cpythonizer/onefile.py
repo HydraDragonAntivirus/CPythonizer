@@ -577,7 +577,8 @@ def write_stub_c(work: Path, app_name: str) -> Path:
 
 def build_stub(work: Path, app_name: str, out_dir: Path, release,
                msbuild: Path, rc_file: Path | None = None,
-               release_mode: bool = False, noconsole: bool = False) -> tuple[Path, Path | None]:
+               release_mode: bool = False, noconsole: bool = False,
+               keep_pdb: bool = False) -> tuple[Path, Path | None]:
     """Compile the stub. Returns (stub_exe, stub_pdb)."""
     guid = str(uuid.uuid4()).upper()
     c_file = write_stub_c(work, app_name)
@@ -585,8 +586,8 @@ def build_stub(work: Path, app_name: str, out_dir: Path, release,
     resource_item = f'    <ResourceCompile Include="{rc_file.name}" />' if rc_file else ""
     subsystem = "Windows" if noconsole else "Console"
     def_subsystem = "_WINDOWS" if noconsole else "_CONSOLE"
-    generate_debug = "false" if release_mode else "true"
-    debug_format = "None" if release_mode else "ProgramDatabase"
+    generate_debug = "true" if (keep_pdb or not release_mode) else "false"
+    debug_format = "ProgramDatabase" if (keep_pdb or not release_mode) else "None"
     proj = STUB_VCXPROJ_TEMPLATE.format(
         GUID="{" + guid + "}",
         NAME=name,
@@ -614,7 +615,8 @@ def build_stub(work: Path, app_name: str, out_dir: Path, release,
     if not exe.is_file():
         raise RuntimeError(f"Stub build finished but EXE missing: {exe}")
     pdb = out_dir / f"{name}.pdb"
-    return exe, pdb if pdb.is_file() and not release_mode else None
+    emit_debug = keep_pdb or not release_mode
+    return exe, pdb if pdb.is_file() and emit_debug else None
 
 
 def make_payload(stage: Path, out: Path) -> tuple[int, int]:
@@ -665,7 +667,8 @@ def verify(exe: Path) -> bool:
 
 def assemble(stage: Path, app_name: str, work: Path, msbuild: Path, release,
              out_exe: Path, icon: Path | None = None,
-             release_mode: bool = False, noconsole: bool = False) -> Path:
+             release_mode: bool = False, noconsole: bool = False,
+             keep_pdb: bool = False) -> Path:
     """Fold the staged program + runtime into one self-extracting EXE."""
     if not (stage / f"{app_name}.exe").is_file():
         raise FileNotFoundError(f"Staged program missing: {stage / f'{app_name}.exe'}")
@@ -684,6 +687,7 @@ def assemble(stage: Path, app_name: str, work: Path, msbuild: Path, release,
     stub_exe, stub_pdb = build_stub(
         work, app_name, stub_dir, release, msbuild,
         rc_file=stub_rc, release_mode=release_mode, noconsole=noconsole,
+        keep_pdb=keep_pdb,
     )
 
     payload = work / "payload.zip"
@@ -693,7 +697,7 @@ def assemble(stage: Path, app_name: str, work: Path, msbuild: Path, release,
     exe = pack(stub_exe, payload, out_exe)
     if not verify(exe):
         raise RuntimeError(f"Packed onefile EXE failed its trailer check: {exe}")
-    if stub_pdb is not None and not release_mode:
+    if stub_pdb is not None and (keep_pdb or not release_mode):
         # Named apart on purpose: these are the stub's symbols, the program
         # itself keeps its own PDB inside the payload.
         shutil.copy2(stub_pdb, out_exe.with_name(f"{app_name}-stub.pdb"))
