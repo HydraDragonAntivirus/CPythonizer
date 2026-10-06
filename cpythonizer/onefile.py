@@ -70,6 +70,7 @@ STUB_C = string.Template(r"""/*
 /* Injected by the build. */
 #define CHILD_NAME   L"$CHILD_NAME"     /* program inside the payload   */
 #define TEMP_PREFIX  L"$TEMP_PREFIX"    /* random folder name prefix   */
+#define PAYLOAD_ENCRYPTED $PAYLOAD_ENCRYPTED
 
 /* Per-build random encryption keys (AES-256-CBC) with key masking */
 static const unsigned char ENC_KEY_MASK[32]   = { $KEY_MASK };
@@ -495,6 +496,7 @@ int wmain(int argc, wchar_t **argv)
     }
     CloseHandle(self_file);
 
+#if PAYLOAD_ENCRYPTED
     unsigned char *plain_buf = NULL;
     DWORD plain_len = 0;
     if (!decrypt_payload(cipher_buf, (DWORD)payload, &plain_buf, &plain_len)) {
@@ -503,6 +505,10 @@ int wmain(int argc, wchar_t **argv)
         return 1;
     }
     free(cipher_buf);
+#else
+    unsigned char *plain_buf = cipher_buf;
+    DWORD plain_len = (DWORD)payload;
+#endif
 
     if (!make_temp_dir(TEMP_PREFIX, tmpdir, 1024)) {
         fail(L"cannot create a temp folder");
@@ -750,15 +756,17 @@ def aes_encrypt(key: bytes, iv: bytes, data: bytes) -> bytes:
         bcrypt.BCryptCloseAlgorithmProvider(h_alg, 0)
 
 
-def write_stub_c(work: Path, app_name: str, mask: bytes, masked_key: bytes, iv: bytes) -> Path:
+def write_stub_c(work: Path, app_name: str, mask: bytes, masked_key: bytes, iv: bytes,
+                 encrypt: bool = True) -> Path:
     """Emit stub.c with per-build random AES keys and program name baked in."""
-    key_mask_str = ", ".join(f"0x{b:02x}" for b in mask)
-    masked_key_str = ", ".join(f"0x{b:02x}" for b in masked_key)
-    iv_str = ", ".join(f"0x{b:02x}" for b in iv)
+    key_mask_str = ", ".join(f"0x{b:02x}" for b in mask) if (mask and encrypt) else "0"
+    masked_key_str = ", ".join(f"0x{b:02x}" for b in masked_key) if (masked_key and encrypt) else "0"
+    iv_str = ", ".join(f"0x{b:02x}" for b in iv) if (iv and encrypt) else "0"
 
     src = STUB_C.substitute(
         CHILD_NAME=f"{app_name}.exe",
         TEMP_PREFIX=app_name,
+        PAYLOAD_ENCRYPTED="1" if encrypt else "0",
         KEY_MASK=key_mask_str,
         KEY_MASKED=masked_key_str,
         ENC_IV=iv_str,
@@ -772,10 +780,10 @@ def build_stub(work: Path, app_name: str, out_dir: Path, release,
                msbuild: Path, mask: bytes, masked_key: bytes, iv: bytes,
                rc_file: Path | None = None,
                release_mode: bool = False, noconsole: bool = False,
-               keep_pdb: bool = False) -> tuple[Path, Path | None]:
+               keep_pdb: bool = False, encrypt: bool = True) -> tuple[Path, Path | None]:
     """Compile the stub. Returns (stub_exe, stub_pdb)."""
     guid = str(uuid.uuid4()).upper()
-    c_file = write_stub_c(work, app_name, mask=mask, masked_key=masked_key, iv=iv)
+    c_file = write_stub_c(work, app_name, mask=mask, masked_key=masked_key, iv=iv, encrypt=encrypt)
     name = f"{app_name}_stub"
     resource_item = f'    <ResourceCompile Include="{rc_file.name}" />' if rc_file else ""
     subsystem = "Windows" if noconsole else "Console"
@@ -820,10 +828,12 @@ def build_stub(work: Path, app_name: str, out_dir: Path, release,
     return exe, pdb if pdb.is_file() and emit_debug else None
 
 
-def make_payload(stage: Path, out: Path, key: bytes, iv: bytes, compress: str = "none") -> tuple[int, int, int]:
-    """Zip the staged program + runtime, optionally compress with LZMA2, and encrypt with AES-256.
+def make_payload(stage: Path, out: Path, key: bytes, iv: bytes, compress: str = "none",
+                 lzma_preset: int = 9, lzma_extreme: bool = True,
+                 encrypt: bool = True) -> tuple[int, int, int]:
+    """Zip the staged program + runtime, optionally compress with LZMA2, and optionally encrypt with AES-256.
 
-    Returns (files_count, encrypted_size, uncompressed_size).
+    Returns (files_count, payload_size, uncompressed_size).
     """
     import lzma
 
@@ -843,29 +853,35 @@ def make_payload(stage: Path, out: Path, key: bytes, iv: bytes, compress: str = 
     raw_zip.unlink(missing_ok=True)
 
     if compress == "lzma2":
-        print(f"[cpythonizer] Compressing payload with LZMA2 max (preset 9 + extreme) ...")
-        to_encrypt = lzma.compress(
+        extreme_flag = lzma.PRESET_EXTREME if lzma_extreme else 0
+        extreme_str = " + extreme" if lzma_extreme else ""
+        print(f"[cpythonizer] Compressing payload with LZMA2 (preset {lzma_preset}{extreme_str}) ...")
+        to_pack = lzma.compress(
             raw_bytes,
-            preset=9 | lzma.PRESET_EXTREME,
+            preset=lzma_preset | extreme_flag,
             format=lzma.FORMAT_XZ,
             check=lzma.CHECK_CRC32,
         )
-        comp_size = len(to_encrypt)
+        comp_size = len(to_pack)
         ratio = (comp_size / uncomp_size) * 100
         print(f"[cpythonizer] LZMA2 compression: {uncomp_size // 1024} KB -> {comp_size // 1024} KB ({ratio:.1f}%)")
     else:
-        to_encrypt = raw_bytes
+        to_pack = raw_bytes
 
-    print(f"[cpythonizer] Encrypting payload with random AES-256 (Windows BCrypt) ...")
-    enc_bytes = aes_encrypt(key, iv, to_encrypt)
-    out.write_bytes(enc_bytes)
-    enc_size = len(enc_bytes)
+    if encrypt:
+        print(f"[cpythonizer] Encrypting payload with random AES-256 (Windows BCrypt) ...")
+        payload_bytes = aes_encrypt(key, iv, to_pack)
+    else:
+        payload_bytes = to_pack
 
-    return files, enc_size, uncomp_size
+    out.write_bytes(payload_bytes)
+    payload_size = len(payload_bytes)
+
+    return files, payload_size, uncomp_size
 
 
 def pack(stub_exe: Path, payload: Path, out: Path, magic: bytes, uncomp_size: int) -> Path:
-    """stub + encrypted payload + trailer -> the single self-extracting EXE."""
+    """stub + payload + trailer -> the single self-extracting EXE."""
     out.parent.mkdir(parents=True, exist_ok=True)
     tmp = out.with_name(out.name + ".tmp")
     with open(stub_exe, "rb") as src, open(tmp, "wb") as dst:
@@ -902,7 +918,9 @@ def verify(exe: Path) -> bool:
 def assemble(stage: Path, app_name: str, work: Path, msbuild: Path, release,
              out_exe: Path, icon: Path | None = None,
              release_mode: bool = False, noconsole: bool = False,
-             keep_pdb: bool = False, compress: str = "none") -> Path:
+             keep_pdb: bool = False, compress: str = "none",
+             lzma_preset: int = 9, lzma_extreme: bool = True,
+             encrypt: bool = True) -> Path:
     """Fold the staged program + runtime into one self-extracting EXE."""
     import os
 
@@ -917,37 +935,42 @@ def assemble(stage: Path, app_name: str, work: Path, msbuild: Path, release,
     stub_rc = None
     if icon is not None and icon.is_file():
         stub_rc = work / f"{app_name}_stub.rc"
-        # Relative to work directory where .vcxproj lives
         stub_rc.write_text(f'1 ICON "{icon.name}"\n', encoding="utf-8")
 
-    # Generate fresh per-build random AES-256 key, IV, and key mask
-    key = os.urandom(32)
-    iv = os.urandom(16)
-    mask = os.urandom(32)
-    masked_key = bytes(k ^ m for k, m in zip(key, mask))
+    if encrypt:
+        # Generate fresh per-build random AES-256 key, IV, and key mask
+        key = os.urandom(32)
+        iv = os.urandom(16)
+        mask = os.urandom(32)
+        masked_key = bytes(k ^ m for k, m in zip(key, mask))
+    else:
+        key = iv = mask = masked_key = b""
 
     stub_exe, stub_pdb = build_stub(
         work, app_name, stub_dir, release, msbuild,
         mask=mask, masked_key=masked_key, iv=iv,
         rc_file=stub_rc, release_mode=release_mode, noconsole=noconsole,
-        keep_pdb=keep_pdb,
+        keep_pdb=keep_pdb, encrypt=encrypt,
     )
 
-    payload = work / "payload.enc"
-    files, enc_size, uncomp_size = make_payload(stage, payload, key=key, iv=iv, compress=compress)
+    payload = work / ("payload.enc" if encrypt else ("payload.xz" if compress == "lzma2" else "payload.zip"))
+    files, payload_size, uncomp_size = make_payload(
+        stage, payload, key=key, iv=iv, compress=compress,
+        lzma_preset=lzma_preset, lzma_extreme=lzma_extreme,
+        encrypt=encrypt,
+    )
 
     magic = MAGIC_LZMA if compress == "lzma2" else MAGIC_RAW
     exe = pack(stub_exe, payload, out_exe, magic, uncomp_size)
     if not verify(exe):
         raise RuntimeError(f"Packed onefile EXE failed its trailer check: {exe}")
     if stub_pdb is not None and (keep_pdb or not release_mode):
-        # Named apart on purpose: these are the stub's symbols, the program
-        # itself keeps its own PDB inside the payload.
         shutil.copy2(stub_pdb, out_exe.with_name(f"{app_name}-stub.pdb"))
     sub_str = " (Windowed / No Console)" if noconsole else ""
     rel_str = " (Release)" if release_mode else ""
-    cmp_str = " (LZMA2 max)" if compress == "lzma2" else ""
-    print(f"[cpythonizer] ONEFILE DONE ({release.label}{sub_str}{rel_str}{cmp_str}, AES-256 encrypted):\n"
+    cmp_str = f" (LZMA2 preset {lzma_preset})" if compress == "lzma2" else ""
+    enc_str = ", AES-256 encrypted" if encrypt else ""
+    print(f"[cpythonizer] ONEFILE DONE ({release.label}{sub_str}{rel_str}{cmp_str}{enc_str}):\n"
           f"  EXE: {exe} ({exe.stat().st_size // (1024 * 1024)} MB, runs alone)\n"
-          "  At startup it decrypts in memory, unpacks into %TEMP%\\<app>-<random>\\ and cleans up after itself.")
+          f"  At startup it {'decrypts in memory, ' if encrypt else ''}unpacks into %TEMP%\\<app>-<random>\\ and cleans up after itself.")
     return exe

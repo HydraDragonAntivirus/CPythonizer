@@ -49,6 +49,7 @@ def cmd_vs_build(args: argparse.Namespace) -> int:
     """Cython-transpile to C, wrap in a VS project, compile with MSBuild."""
     from .cython_vs import build as vs_build
 
+    compress = "lzma2" if (getattr(args, "lzma2", False) or getattr(args, "compress", None) == "lzma2") else "none"
     out = vs_build(
         entry=args.entry,
         name=args.name,
@@ -61,14 +62,30 @@ def cmd_vs_build(args: argparse.Namespace) -> int:
         release=getattr(args, "release", False),
         noconsole=getattr(args, "noconsole", False),
         keep_pdb=getattr(args, "keep_pdb", False),
-        compress="lzma2" if (getattr(args, "lzma2", False) or getattr(args, "compress", None) == "lzma2") else "none",
+        compress=compress,
+        lzma_preset=getattr(args, "lzma_preset", 9),
+        lzma_extreme=getattr(args, "lzma_extreme", True),
+        encrypt=getattr(args, "encrypt", True),
+        obfuscate=getattr(args, "obfuscate", False),
     )
     print(out)
     return 0
 
 
+def cmd_obfuscate(args: argparse.Namespace) -> int:
+    """Strip comments from a Python source file."""
+    from .obfuscator import remove_inline_comments
+    cleaned = remove_inline_comments(args.file, in_place=args.in_place, out_file=args.out)
+    if not args.in_place and not args.out:
+        print(cleaned, end="")
+    else:
+        target = args.file if args.in_place else args.out
+        print(f"[cpythonizer] Obfuscated (comments stripped): {target}")
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
-    """Create the CLI parser (doctor + vs-build subcommands)."""
+    """Create the CLI parser (doctor + vs-build + obfuscate subcommands)."""
     p = argparse.ArgumentParser(
         prog="cpythonizer",
         description="Python 3.14 -> Cython C -> Visual Studio 2026/2022 EXE+PDB.",
@@ -92,10 +109,18 @@ def build_parser() -> argparse.ArgumentParser:
                    help="Generate embedded main() entrypoint via cython --embed (default: True)")
     v.add_argument("--onefile", action="store_true",
                    help="Ship one self-extracting EXE: unpacks to a random %%TEMP%% folder, runs under its original name, cleans up")
+    v.add_argument("--encrypt", action=argparse.BooleanOptionalAction, default=True,
+                   help="Encrypt onefile payload with per-build random AES-256 key (default: True, use --no-encrypt to disable)")
     v.add_argument("--lzma2", action="store_true", default=False,
-                   help="Compress onefile payload with LZMA2 (preset 9 + extreme) for maximum compression / minimum EXE size")
+                   help="Compress onefile payload with LZMA2 for maximum compression / minimum EXE size")
     v.add_argument("--compress", choices=["none", "lzma2"], default=None,
                    help="Onefile compression algorithm (none or lzma2)")
+    v.add_argument("--lzma-preset", type=int, choices=range(0, 10), default=9,
+                   help="LZMA2 compression preset level (0-9, default: 9)")
+    v.add_argument("--lzma-extreme", action=argparse.BooleanOptionalAction, default=True,
+                   help="Enable/disable LZMA2 extreme preset for extra compression ratio (default: True)")
+    v.add_argument("--obfuscate", action="store_true", default=False,
+                   help="Obfuscator: Strip inline comments and comment lines from Python sources before Cython transpilation")
     v.add_argument("--icon", default=None,
                    help="Application icon file (.ico or .png; PNG files are converted automatically)")
     v.add_argument("--include-package", "--package", dest="include_packages", action="append", default=[],
@@ -107,6 +132,14 @@ def build_parser() -> argparse.ArgumentParser:
     v.add_argument("--noconsole", "--windowed", dest="noconsole", action="store_true", default=False,
                    help="Hide the black console window at startup (for GUI apps like Tkinter, PyQt)")
     v.set_defaults(func=cmd_vs_build)
+
+    o = sub.add_parser("obfuscate", help="Strip comments and inline comments from a Python file")
+    o.add_argument("file", help="Python source file to strip comments from")
+    o.add_argument("--in-place", "-i", action="store_true", default=False,
+                   help="Modify file in-place")
+    o.add_argument("--out", "-o", default=None,
+                   help="Output file path (default: stdout)")
+    o.set_defaults(func=cmd_obfuscate)
     return p
 
 

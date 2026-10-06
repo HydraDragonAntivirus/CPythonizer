@@ -21,7 +21,11 @@ python -m cpythonizer vs-build examples/single_hello.py --name Hello --dist dist
 
 Options:
 - `--onefile`: Folds the program, runtime (`python314.dll`), stdlib (`python314.zip`), extension modules, and third-party packages into a single self-contained `.exe` (see below).
-- `--lzma2`: Compresses the onefile payload using **LZMA2 maximum compression** (preset 9 + extreme). Significantly shrinks the output binary size (e.g. 35 MB -> ~14 MB) while unpacking directly in memory in ~0.2 s.
+- `--encrypt` / `--no-encrypt`: Encrypts the onefile payload with a unique random AES-256 key per build (default: enabled).
+- `--lzma2` / `--compress lzma2`: Compresses the onefile payload using **LZMA2 compression**.
+- `--lzma-preset <0..9>`: Configurable LZMA2 compression level (default: `9`).
+- `--lzma-extreme` / `--no-lzma-extreme`: Enable/disable LZMA2 extreme preset for extra compression (default: enabled).
+- `--obfuscate`: Strips inline and line comments from all Python sources (entry & local modules) before Cython transpilation without touching strings or regexes.
 - `--release`: Strips debug symbols / PDB, enables max compiler optimizations, and applies Cython speedup directives.
 - `--keep-pdb`: Retains debug symbols (`.pdb`) even when building with `--release`.
 - `--noconsole` / `--windowed`: Windows GUI subsystem — hides the black console/CMD window at launch (for Tkinter, PyQt, etc.).
@@ -29,6 +33,21 @@ Options:
 - `--icon <path>`: Executable icon (`.ico` or `.png`; PNG files are converted automatically).
 - `--include-package <name>`: Explicitly bundle a third-party package (third-party imports like `requests` are also detected and bundled automatically).
 - `--vs 2026` / `--vs 2022`: Pin a specific Visual Studio version (default: `auto` = newest installed).
+
+### Obfuscator & Comment Stripper
+Strip inline and standalone comments from any Python file safely without altering strings, raw strings, docstrings or regexes:
+
+```powershell
+# Print stripped code to stdout
+python -m cpythonizer obfuscate myfile.py
+
+# In-place modification
+python -m cpythonizer obfuscate myfile.py --in-place
+
+# Python API
+from cpythonizer.obfuscator import remove_inline_comments
+remove_inline_comments("myfile.py", in_place=True)
+```
 
 ### Onefile Internals & Security
 The onefile EXE is `[ stub ][ AES-256 encrypted payload ZIP / XZ ][ 24-byte trailer ]`, where the trailer is
