@@ -34,19 +34,43 @@ Options:
 - `--include-package <name>`: Explicitly bundle a third-party package (third-party imports like `requests` are also detected and bundled automatically).
 - `--vs 2026` / `--vs 2022`: Pin a specific Visual Studio version (default: `auto` = newest installed).
 
-### Obfuscator & Comment Stripper
-Strip inline and standalone comments from any Python file safely without altering strings, raw strings, docstrings or regexes:
+### Obfuscator & Source Protection
+The built-in obfuscator safely transforms Python sources before or during Cython compilation:
+
+- **Comment Stripper**: Tokenize-based stripping of inline (`# ...`) and standalone comments without altering strings, raw strings, docstrings or regexes.
+- **AST Function Name Randomization**: Automatically renames function definitions and internal callers to randomized identifiers (`_cpx_fn_<hex>`) via Python AST.
+- **Random Decoy Step Comments**: Injects randomized decoy step comment lines (`# [cpx-step: <token>]`) before statements.
+- **Base64 Exec Wrapper (`Encrypt` class)**: Compresses/encodes sources into self-executing `import base64; exec(base64.b64decode(...))` scripts.
 
 ```powershell
-# Print stripped code to stdout
-python -m cpythonizer obfuscate myfile.py
-
-# In-place modification
+# Strip comments
 python -m cpythonizer obfuscate myfile.py --in-place
 
-# Python API
-from cpythonizer.obfuscator import remove_inline_comments
+# Full obfuscation (strip comments + rename functions via AST + insert random step comments)
+python -m cpythonizer obfuscate myfile.py --all --in-place
+
+# Base64 exec wrapper
+python -m cpythonizer obfuscate myfile.py --b64
+
+# Interactive Encrypt CLI
+python -m cpythonizer.obfuscator
+
+# Integrated with vs-build:
+python -m cpythonizer vs-build main.py --onefile --obfuscate --release
+```
+
+Python API:
+```python
+from cpythonizer.obfuscator import remove_inline_comments, obfuscate_source, Encrypt
+
+# Strip comments:
 remove_inline_comments("myfile.py", in_place=True)
+
+# Full AST + step comment obfuscation:
+cleaned_code = obfuscate_source(source_text, rename_funcs=True, add_comments=True)
+
+# Base64 encrypt:
+Encrypt().encrypt("myfile.py")
 ```
 
 ### Onefile Internals & Security

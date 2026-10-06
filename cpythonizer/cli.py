@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import argparse
+from pathlib import Path
 
 
 def _vs_choices() -> list[str]:
@@ -73,14 +74,46 @@ def cmd_vs_build(args: argparse.Namespace) -> int:
 
 
 def cmd_obfuscate(args: argparse.Namespace) -> int:
-    """Strip comments from a Python source file."""
-    from .obfuscator import remove_inline_comments
-    cleaned = remove_inline_comments(args.file, in_place=args.in_place, out_file=args.out)
-    if not args.in_place and not args.out:
-        print(cleaned, end="")
+    """Obfuscate a Python source file."""
+    import shutil
+    from .obfuscator import strip_comments, randomize_function_names, add_random_comments, Encrypt
+
+    src_path = Path(args.file).resolve()
+    if not src_path.is_file():
+        print(f"Error: File not found: {src_path}")
+        return 1
+
+    if args.b64:
+        enc = Encrypt()
+        if args.in_place:
+            enc.encrypt(src_path)
+        else:
+            out_target = Path(args.out).resolve() if args.out else src_path.with_name(f"{src_path.stem}_enc.py")
+            shutil.copy2(src_path, out_target)
+            enc.encrypt(out_target)
+            if not args.out:
+                print(f"[cpythonizer] Base64 encoded file written: {out_target}")
+        return 0
+
+    code = src_path.read_text(encoding="utf-8")
+    code = strip_comments(code)
+
+    if args.rename_funcs or args.all:
+        code, mapping = randomize_function_names(code)
+        if mapping:
+            print(f"[cpythonizer] Randomized {len(mapping)} function(s) via AST: {', '.join(mapping.keys())}")
+
+    if args.random_comments or args.all:
+        code = add_random_comments(code)
+
+    if args.in_place:
+        src_path.write_text(code, encoding="utf-8")
+        print(f"[cpythonizer] Obfuscated (in-place): {src_path}")
+    elif args.out:
+        Path(args.out).resolve().write_text(code, encoding="utf-8")
+        print(f"[cpythonizer] Obfuscated: {args.out}")
     else:
-        target = args.file if args.in_place else args.out
-        print(f"[cpythonizer] Obfuscated (comments stripped): {target}")
+        print(code, end="")
     return 0
 
 
@@ -120,7 +153,7 @@ def build_parser() -> argparse.ArgumentParser:
     v.add_argument("--lzma-extreme", action=argparse.BooleanOptionalAction, default=True,
                    help="Enable/disable LZMA2 extreme preset for extra compression ratio (default: True)")
     v.add_argument("--obfuscate", action="store_true", default=False,
-                   help="Obfuscator: Strip inline comments and comment lines from Python sources before Cython transpilation")
+                   help="Obfuscator: Strip comments, randomize function names via AST, and inject random step comments")
     v.add_argument("--icon", default=None,
                    help="Application icon file (.ico or .png; PNG files are converted automatically)")
     v.add_argument("--include-package", "--package", dest="include_packages", action="append", default=[],
@@ -133,12 +166,20 @@ def build_parser() -> argparse.ArgumentParser:
                    help="Hide the black console window at startup (for GUI apps like Tkinter, PyQt)")
     v.set_defaults(func=cmd_vs_build)
 
-    o = sub.add_parser("obfuscate", help="Strip comments and inline comments from a Python file")
-    o.add_argument("file", help="Python source file to strip comments from")
+    o = sub.add_parser("obfuscate", help="Obfuscate Python source files")
+    o.add_argument("file", help="Python source file to obfuscate")
     o.add_argument("--in-place", "-i", action="store_true", default=False,
                    help="Modify file in-place")
     o.add_argument("--out", "-o", default=None,
                    help="Output file path (default: stdout)")
+    o.add_argument("--rename-funcs", action="store_true", default=False,
+                   help="Randomize function names via AST")
+    o.add_argument("--random-comments", action="store_true", default=False,
+                   help="Insert randomized decoy comment lines for each step")
+    o.add_argument("--all", "-a", action="store_true", default=False,
+                   help="Apply all steps: strip comments + rename functions + insert random step comments")
+    o.add_argument("--b64", "--base64", dest="b64", action="store_true", default=False,
+                   help="Wrap file in base64 exec encoding")
     o.set_defaults(func=cmd_obfuscate)
     return p
 
