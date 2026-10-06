@@ -1558,6 +1558,10 @@ def _encrypt_literals(src: str) -> str:
     ntdll/kernel32 entry points - never reaches the binary at all. Each call
     site gets its own key, so the same name twice does not share ciphertext.
 
+    The output goes through obfh_str_pool()/obfh_wstr_pool(), which decode into
+    per-thread static storage: decrypting a compound literal in place and
+    passing the pointer on does not survive MSVC (see literals.h).
+
     Without this the literals would still be greppable: MSVC keeps a string
     operand as immediates in .text even when it never becomes a data-section
     entry, so "hide it on the stack" is not enough.
@@ -1574,22 +1578,16 @@ def _encrypt_literals(src: str) -> str:
         text = m.group(1)
         key = key_for(text)
         raw = text.encode("utf-16-le") + b"\x00\x00"
-        # One wchar_t per code point: combining the byte pair matters, emitting
-        # the bytes separately would produce L"k\x00e\x00" as individual
-        # characters and the string would never match anything.
-        vals = "".join(
-            f"0x{(raw[i] ^ key) | ((raw[i + 1] ^ key) << 8):04x}, "
-            for i in range(0, len(raw), 2)
-        )
-        return (f"obfh_decrypt_wstr((wchar_t[]){{{vals.rstrip()}}}, "
-                f"0x{key:02x}, {len(raw) // 2})")
+        data = ", ".join(f"0x{b ^ key:02x}" for b in raw)
+        return (f"obfh_wstr_pool((const unsigned char[]){{{data}}}, "
+                f"0x{key:02x}, {len(raw)})")
 
     def narrow(m: re.Match) -> str:
         text = m.group(1)
         key = key_for(text)
         raw = text.encode("latin-1", "replace") + b"\x00"
         data = ", ".join(f"0x{b ^ key:02x}" for b in raw)
-        return (f"obfh_decrypt_str((unsigned char[]){{{data}}}, "
+        return (f"obfh_str_pool((const unsigned char[]){{{data}}}, "
                 f"0x{key:02x}, {len(raw)})")
 
     src = _HWSTR_RE.sub(wide, src)
