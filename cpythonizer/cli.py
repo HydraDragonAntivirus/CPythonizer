@@ -71,6 +71,7 @@ def cmd_vs_build(args: argparse.Namespace) -> int:
         obfuscate=getattr(args, "obfuscate", False),
         zombie=zombie,
         antidump=getattr(args, "antidump", True),
+        guard=getattr(args, "guard", "off"),
     )
     print(out)
     return 0
@@ -162,6 +163,10 @@ def build_parser() -> argparse.ArgumentParser:
                         "itself is mapped in RAM and NEVER written to disk - the dropped EXE is an empty shell")
     v.add_argument("--no-antidump", dest="antidump", action="store_false", default=True,
                    help="Zombie mode: keep SizeOfImage intact instead of blanking it (anti-dump off)")
+    v.add_argument("--guard", choices=["off", "basic", "full"], default="off",
+                   help="Zombie mode: obfuscate the loader itself - 'basic' hides every fingerprinting "
+                        "string and guards the two decrypt sites with the anti-debug probe set, 'full' "
+                        "adds the hardware-breakpoint probe and fake protector sections (default: off)")
     v.add_argument("--encrypt", action=argparse.BooleanOptionalAction, default=True,
                    help="Encrypt onefile payload with per-build random AES-256 key (default: True, use --no-encrypt to disable)")
     v.add_argument("--lzma2", action="store_true", default=False,

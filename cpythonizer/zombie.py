@@ -41,6 +41,7 @@ like the ordinary staged build.
 from __future__ import annotations
 
 import os
+import re
 import shutil
 import string
 import uuid
@@ -61,6 +62,18 @@ MODE_LZMA2 = 1
 
 COPY_CHUNK = 1 << 20
 SKIP_SUFFIXES = (".pdb", ".exp", ".lib", ".ilk")
+
+# Guard layers for the stub itself. "off" compiles the plain loader, "basic"
+# hides every fingerprinting literal and guards the two decrypt sites, "full"
+# adds the hardware-breakpoint probe and fake protector section markers.
+GUARD_LEVELS = ("off", "basic", "full")
+GUARD_DIR = Path(__file__).parent / "obfuscate"
+GUARD_HEADER = "obfus_msvc.h"
+# Per-build salt for the literal keys; mixed into the seed below.
+OBFH_SITE_SALT = int.from_bytes(os.urandom(4), "little")
+
+_HWSTR_RE = re.compile(r'CPY_HWSTR\("([^"\\]*)"\)')
+_HSTR_RE = re.compile(r'CPY_HSTR\("([^"\\]*)"\)')
 
 # Debug switches, read by the stub at runtime:
 #   CPYTHONIZER_ONEFILE_VERBOSE=1     print what the loader does to stderr
@@ -97,8 +110,8 @@ STUB_C = string.Template(r"""/*
 #endif
 #include "xz.h"
 
-#define MAGIC_OUTER   "CPYZMB1"
-#define MAGIC_ZOMBIE  "CPYZMB2"
+#define MAGIC_OUTER   CPY_HSTR("CPYZMB1")
+#define MAGIC_ZOMBIE  CPY_HSTR("CPYZMB2")
 #define TAIL_OUTER    56
 #define TAIL_ZOMBIE   32
 
@@ -114,6 +127,36 @@ STUB_C = string.Template(r"""/*
 #define TEMP_PREFIX       L"$TEMP_PREFIX"  /* random folder name prefix    */
 #define ANTIDUMP          $ANTIDUMP         /* 1 = blank SizeOfImage        */
 #define PAYLOAD_ENCRYPTED $PAYLOAD_ENCRYPTED
+$GUARD
+
+/*
+ * Guard layer. CPX_OBF=1 pulls in obfus_msvc.h (the MSVC port of the parts of
+ * obfus.h that work without GCC): stack strings, the anti-debug probe set and
+ * the flattened dispatcher. Every literal that fingerprints this loader is
+ * hidden, and the anti-debug response lives behind an obfuscated sink.
+ */
+#if CPX_OBF
+/* The header brings its own CPY_HSTR / CPY_HWSTR placeholders. */
+#define CPX_ANTI_DEBUG                    \
+    do {                                  \
+        if (!env_flag(CPY_HWSTR("CPYTHONIZER_ONEFILE_NOAD")))  \
+            ANTI_DEBUG;                   \
+    } while (0)
+#else
+#define CPY_HSTR(s) s
+#define CPY_HWSTR(s) L##s
+#define VM_EQU(a, b) ((a) == (b))
+#define VM_NEQ(a, b) ((a) != (b))
+/* Same source, no obfuscation: the dispatcher degenerates to a plain
+ * sequence, so both modes are compiled from one listing. */
+#define OBF_DISPATCH_BEGIN(type) if (1) {
+#define OBF_DISPATCH_CASE(n) if (1)
+#define OBF_DISPATCH_GOTO(n) if (1)
+#define OBF_DISPATCH_EXIT goto obfh_dispatch_done;
+#define OBF_DISPATCH_END() } obfh_dispatch_done: (void)0;
+#define CPX_ANTI_DEBUG ((void)0)
+#endif
+
 
 /* Per-build random AES-256-CBC material, masked, one set per blob. */
 static const unsigned char K1_MASK[32]   = { $K1_MASK };
@@ -143,14 +186,14 @@ static int env_flag(const wchar_t *name)
 static int verbose(void)
 {
     if (g_verbose < 0)
-        g_verbose = env_flag(L"CPYTHONIZER_ONEFILE_VERBOSE");
+        g_verbose = env_flag(CPY_HWSTR("CPYTHONIZER_ONEFILE_VERBOSE"));
     return g_verbose;
 }
 
 static int antidump(void)
 {
     if (g_antidump < 0)
-        g_antidump = env_flag(L"CPYTHONIZER_ONEFILE_NOANTIDUMP") ? 0 : ANTIDUMP;
+        g_antidump = env_flag(CPY_HWSTR("CPYTHONIZER_ONEFILE_NOANTIDUMP")) ? 0 : ANTIDUMP;
     return g_antidump;
 }
 
@@ -359,10 +402,10 @@ static int keep_temp(int argc, wchar_t **argv)
 {
     int i;
 
-    if (env_flag(L"CPYTHONIZER_ONEFILE_KEEP"))
+    if (env_flag(CPY_HWSTR("CPYTHONIZER_ONEFILE_KEEP")))
         return 1;
     for (i = 1; i < argc; i++)
-        if (!wcscmp(argv[i], L"--cpythonizer-keep"))
+        if (!wcscmp(argv[i], CPY_HWSTR("--cpythonizer-keep")))
             return 1;
     return 0;
 }
@@ -797,7 +840,7 @@ static int register_unwind(unsigned char *base, ULONGLONG delta,
     ntdll = GetModuleHandleW(L"ntdll.dll");
     if (!ntdll)
         return 0;
-    fn = GetProcAddress(ntdll, "RtlAddFunctionTable");
+    fn = GetProcAddress(ntdll, CPY_HSTR("RtlAddFunctionTable"));
     if (!fn)
         return 0;
 
@@ -1072,6 +1115,9 @@ static int role_droper(const wchar_t *self, int argc, wchar_t **argv)
          (unsigned long long)stub_size, (unsigned long long)stored1, mode1,
          (unsigned long long)stored2, mode2);
 
+    /* Nothing that reveals the payload happens before this point. */
+    CPX_ANTI_DEBUG;
+
     runtime = load_blob(f, stub_size, stored1, orig1, mode1, crc1,
                         K1_MASK, K1_MASKED, K1_IV, &runtime_len);
     if (!runtime) {
@@ -1214,8 +1260,11 @@ static int role_zombie(const wchar_t *self, int argc, wchar_t **argv)
     }
     blob_off = size - TAIL_ZOMBIE - stored2;
 
-    SetEnvironmentVariableW(L"CPYTHONIZER_TEMP", self);
-    SetEnvironmentVariableW(L"_MEIPASS", self);
+    /* Guard the decrypt itself, not what happens after it. */
+    CPX_ANTI_DEBUG;
+
+    SetEnvironmentVariableW(CPY_HWSTR("CPYTHONIZER_TEMP"), self);
+    SetEnvironmentVariableW(CPY_HWSTR("_MEIPASS"), self);
 
     program = load_blob(f, blob_off, stored2, orig2, mode2, crc2,
                         K2_MASK, K2_MASKED, K2_IV, &program_len);
@@ -1242,42 +1291,67 @@ static int role_zombie(const wchar_t *self, int argc, wchar_t **argv)
 
 /* ------------------------------------------------------------------ */
 
+/*
+ * Role selection, written as one dispatcher loop. In the binary this is a
+ * single switch inside a single loop with an opaque state variable, the same
+ * shape OLLVM's flattening produces - and the role is no longer visible as an
+ * "if (magic == X)" branch that can be patched to always take one path.
+ */
 int wmain(int argc, wchar_t **argv)
 {
     wchar_t self[MAX_PATH];
     unsigned char tail[TAIL_OUTER];
     ULONGLONG size;
     HANDLE f;
+    int rc = 1;
 
-    if (GetModuleFileNameW(NULL, self, MAX_PATH) == 0) {
-        fail(L"cannot resolve own path");
-        return 1;
-    }
-    f = CreateFileW(self, GENERIC_READ, FILE_SHARE_READ, NULL, OPEN_EXISTING,
-                    FILE_ATTRIBUTE_NORMAL, NULL);
-    if (f == INVALID_HANDLE_VALUE) {
-        fail(L"cannot open own executable");
-        return 1;
-    }
-    if (!GetFileSizeEx(f, (LARGE_INTEGER *)&size) || size < TAIL_OUTER ||
-        !read_at(f, size - TAIL_OUTER, tail, TAIL_OUTER)) {
-        fail(L"cannot read own trailer");
-        CloseHandle(f);
-        return 1;
-    }
+    OBF_DISPATCH_BEGIN(int)
 
-    if (memcmp(tail, MAGIC_OUTER, 8) == 0) {
+    OBF_DISPATCH_CASE(0)
+        if (GetModuleFileNameW(NULL, self, MAX_PATH) == 0) {
+            fail(L"cannot resolve own path");
+            OBF_DISPATCH_EXIT
+        }
+        f = CreateFileW(self, GENERIC_READ, FILE_SHARE_READ, NULL,
+                        OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
+        if (f == INVALID_HANDLE_VALUE) {
+            fail(L"cannot open own executable");
+            OBF_DISPATCH_EXIT
+        }
+        if (!GetFileSizeEx(f, (LARGE_INTEGER *)&size) || size < TAIL_OUTER ||
+            !read_at(f, size - TAIL_OUTER, tail, TAIL_OUTER)) {
+            fail(L"cannot read own trailer");
+            CloseHandle(f);
+            OBF_DISPATCH_EXIT
+        }
+        OBF_DISPATCH_GOTO(1)
+
+    OBF_DISPATCH_CASE(1)
+        /* The first byte is compared through the VM, so the role is not
+           visible as a plain "magic == constant" branch. */
+        if (VM_EQU((int)(tail[0] ^ MAGIC_OUTER[0]), 0) &&
+            memcmp(tail, MAGIC_OUTER, 8) == 0) {
+            CloseHandle(f);
+            rc = role_droper(self, argc, argv);
+            OBF_DISPATCH_EXIT
+        }
+        if (size >= TAIL_ZOMBIE &&
+            VM_EQU((int)(tail[TAIL_OUTER - TAIL_ZOMBIE] ^ MAGIC_ZOMBIE[0]), 0) &&
+            memcmp(tail + (TAIL_OUTER - TAIL_ZOMBIE), MAGIC_ZOMBIE, 8) == 0) {
+            CloseHandle(f);
+            rc = role_zombie(self, argc, argv);
+            OBF_DISPATCH_EXIT
+        }
         CloseHandle(f);
-        return role_droper(self, argc, argv);
-    }
-    if (size >= TAIL_ZOMBIE &&
-        memcmp(tail + (TAIL_OUTER - TAIL_ZOMBIE), MAGIC_ZOMBIE, 8) == 0) {
-        CloseHandle(f);
-        return role_zombie(self, argc, argv);
-    }
-    CloseHandle(f);
-    fail(L"not a cpythonizer zombie executable");
-    return 1;
+        fail(L"not a cpythonizer zombie executable");
+        OBF_DISPATCH_GOTO(2)
+
+    OBF_DISPATCH_CASE(2)
+        rc = 1;
+        OBF_DISPATCH_EXIT
+
+    OBF_DISPATCH_END()
+    return rc;
 }
 """)
 
@@ -1293,14 +1367,75 @@ def _new_keys() -> tuple[bytes, bytes, bytes, bytes]:
     return key, mask, bytes(k ^ m for k, m in zip(key, mask)), os.urandom(16)
 
 
+def _guard_block(level: str) -> str:
+    """Preprocessor block the stub #includes: obfus_msvc.h plus its switches.
+
+    The seed is random per build so the mixed constants differ every time.
+    """
+    if level == "off":
+        return "#define CPX_OBF 0\n"
+    if not (GUARD_DIR / GUARD_HEADER).is_file():
+        raise FileNotFoundError(f"Guard header missing: {GUARD_DIR / GUARD_HEADER}")
+    seed = int.from_bytes(os.urandom(4), "little")
+    defines = [
+        "#define CPX_OBF 1",
+        f"#define OBFH_BUILD_SEED 0x{seed:08x}u",
+        f"#define OBFH_AD_V2 {1 if level == 'full' else 0}",
+        f"#define OBFH_FAKE_SIGNS {1 if level == 'full' else 0}",
+        f'#include "{GUARD_HEADER}"',
+    ]
+    return "\n".join(defines) + "\n"
+
+
+def _encrypt_literals(src: str) -> str:
+    """Rewrite CPY_HSTR("x") / CPY_HWSTR("x") into XOR-encrypted arrays.
+
+    The stub's own literals and obfus_msvc.h's API names go through here, so
+    the plaintext of the loader - trailer magics, environment variable names,
+    ntdll/kernel32 entry points - never reaches the binary at all. Each call
+    site gets its own key, so the same name twice does not share ciphertext.
+
+    Without this the literals would still be greppable: MSVC keeps a string
+    operand as immediates in .text even when it never becomes a data-section
+    entry, so "hide it on the stack" is not enough.
+    """
+    counter = [0]
+
+    def key_for(text: str) -> int:
+        counter[0] += 1
+        # deterministic per site, but not derivable from the plaintext
+        return (0xA7 ^ (len(text) * 37) ^ (counter[0] * 61) ^
+                (OBFH_SITE_SALT * 11)) & 0xFF
+
+    def wide(m: re.Match) -> str:
+        text = m.group(1)
+        key = key_for(text)
+        raw = text.encode("utf-16-le") + b"\x00\x00"
+        points = ", ".join(f"0x{b ^ key:02x}" for b in raw)
+        return (f"obfh_decrypt_wstr((wchar_t[]){{{points}}}, "
+                f"0x{key:02x}, {len(raw) // 2})")
+
+    def narrow(m: re.Match) -> str:
+        text = m.group(1)
+        key = key_for(text)
+        raw = text.encode("latin-1", "replace") + b"\x00"
+        data = ", ".join(f"0x{b ^ key:02x}" for b in raw)
+        return (f"obfh_decrypt_str((unsigned char[]){{{data}}}, "
+                f"0x{key:02x}, {len(raw)})")
+
+    src = _HWSTR_RE.sub(wide, src)
+    return _HSTR_RE.sub(narrow, src)
+
+
 def write_stub_c(work: Path, app_name: str, k1: tuple, k2: tuple,
-                 encrypt: bool, antidump: bool) -> Path:
+                 encrypt: bool, antidump: bool, guard: str = "off") -> Path:
     """Emit the zombie stub source with its per-build key material."""
     src = STUB_C.substitute(
         CHILD_NAME=f"{app_name}.exe",
         TEMP_PREFIX=app_name,
         ANTIDUMP="1" if antidump else "0",
         PAYLOAD_ENCRYPTED="1" if encrypt else "0",
+        GUARD=_guard_block(guard),
         K1_MASK=_bytes_list(k1[1]),
         K1_MASKED=_bytes_list(k1[2]),
         K1_IV=_bytes_list(k1[3]),
@@ -1308,6 +1443,15 @@ def write_stub_c(work: Path, app_name: str, k1: tuple, k2: tuple,
         K2_MASKED=_bytes_list(k2[2]),
         K2_IV=_bytes_list(k2[3]),
     )
+    header = work / GUARD_HEADER
+    if guard != "off":
+        # The header sits next to the generated .c (no include path juggling)
+        # and its own literals are encrypted in the same pass.
+        header.write_text(
+            _encrypt_literals((GUARD_DIR / GUARD_HEADER).read_text(encoding="utf-8")),
+            encoding="utf-8",
+        )
+        src = _encrypt_literals(src)
     path = work / f"{app_name}_zombie.c"
     path.write_text(src, encoding="utf-8")
     return path
@@ -1487,8 +1631,11 @@ def assemble(stage: Path, app_name: str, work: Path, msbuild: Path, release,
              release_mode: bool = False, noconsole: bool = False,
              keep_pdb: bool = False, compress: str = "none",
              lzma_preset: int = 9, lzma_extreme: bool = True,
-             encrypt: bool = True, antidump: bool = True) -> Path:
+             encrypt: bool = True, antidump: bool = True,
+             guard: str = "off") -> Path:
     """Fold the runtime into %TEMP% and keep the program in memory only."""
+    if guard not in GUARD_LEVELS:
+        raise ValueError(f"guard must be one of {GUARD_LEVELS}, got {guard!r}")
     program = stage / f"{app_name}.exe"
     if not program.is_file():
         raise FileNotFoundError(f"Staged program missing: {program}")
@@ -1507,6 +1654,7 @@ def assemble(stage: Path, app_name: str, work: Path, msbuild: Path, release,
     k2 = _new_keys() if encrypt else (b"", b"", b"", b"", b"")
     c_file = write_stub_c(
         work, app_name, k1, k2, encrypt=encrypt, antidump=antidump,
+        guard=guard,
     )
     stub_exe, stub_pdb = build_stub(
         work, app_name, stub_dir, release, msbuild, c_file,
@@ -1537,7 +1685,8 @@ def assemble(stage: Path, app_name: str, work: Path, msbuild: Path, release,
     print(f"[cpythonizer] ZOMBIE DONE ({release.label}"
           f"{', AES-256' if encrypt else ''}"
           f"{', LZMA2' if compress == 'lzma2' else ''}"
-          f"{', anti-dump' if antidump else ''}):\n"
+          f"{', anti-dump' if antidump else ''}"
+          f"{', guard:' + guard if guard != 'off' else ''}):\n"
           f"  EXE: {exe} ({exe.stat().st_size // (1 << 20)} MB, runs alone)\n"
           f"  runtime blob {r_stored // (1 << 10)} KB / {r_files} file(s) -> "
           f"%TEMP%\\<app>-<random>\\ on start\n"

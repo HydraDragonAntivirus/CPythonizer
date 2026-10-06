@@ -24,6 +24,7 @@ Options:
 - `--zombie`: Zombie loader (implies `--onefile`): the runtime is dropped to `%TEMP%` as real files, but the **program itself is mapped in RAM and never written to disk** - the dropped EXE is an empty shell (see below).
 - `--encrypt` / `--no-encrypt`: Encrypts the onefile payload with a unique random AES-256 key per build (default: enabled).
 - `--no-antidump`: Zombie mode: keep `SizeOfImage` intact instead of blanking it (anti-dump off, default: on).
+- `--guard <off|basic|full>`: Zombie mode: obfuscate the loader itself — compile-time string encryption, anti-debug probes and a flattened role dispatch (`full` adds hardware-breakpoint detection and fake protector sections). Default: `off`.
 - `--lzma2` / `--compress lzma2`: Compresses the onefile payload using **LZMA2 compression**.
 - `--lzma-preset <0..9>`: Configurable LZMA2 compression level (default: `9`).
 - `--lzma-extreme` / `--no-lzma-extreme`: Enable/disable LZMA2 extreme preset for extra compression (default: enabled).
@@ -156,6 +157,56 @@ them with LZMA2 preset 9. The debug switches of `--onefile` work unchanged
 (`CPYTHONIZER_ONEFILE_VERBOSE=1`, `--cpythonizer-keep`), and in verbose mode the loader prints
 what it maps, which imports it resolved, and — if the mapped program ever faults — the faulting
 address and the module it belongs to.
+
+### Guard layers (`--guard basic|full`)
+
+The loader is C, so it is the softest target in the package. `--guard` compiles the stub with
+`cpythonizer/obfuscate/obfus_msvc.h` — an **MSVC port of the usable parts of
+[DosX/obfus.h](https://github.com/DosX-dev/obfus.h)**:
+
+| level | what it adds |
+|---|---|
+| `off` (default) | plain loader, every literal visible |
+| `basic` | compile-time string encryption, anti-debug at both decrypt sites, flattened role dispatch |
+| `full` | `basic` + hardware-breakpoint probe (DR7) and fake protector sections (`.aspack`, `.adata`, `__wibu00`) |
+
+**Why a port instead of the upstream header.** obfus.h does not support MSVC by design: it
+rewrites every `if`/`while`/`for`/`switch` with GNU statement expressions and builds its
+control-flow and junk layers on GNU inline AT&T asm, `__builtin_choose_expr` and `__typeof__`.
+None of those exist for x64 `cl.exe` (`#warning obfus.h doesn't support Visual C/C++`), and
+there is no flag that changes that. The port keeps what translates — the `RND()` mixing, stack
+and encrypted strings, opaque predicates, the math VM, the anti-debug probe set with its
+response behind an obfuscated sink, fake signatures — and replaces what does not: `__rdtsc`
+and `__readgsqword` intrinsics instead of inline asm, and an explicit `OBF_DISPATCH_*`
+dispatcher instead of the automatic `if`/`while` rewriting. The result in the binary is the
+same shape OLLVM's flattening produces: one switch inside one loop with an opaque state value.
+
+**String encryption is real, not cosmetic.** obfus.h's `HIDE_STRING` only keeps a literal out of
+the *data sections* — MSVC still emits the bytes as `.text` immediates, so a raw grep over the
+file finds them anyway. The port therefore encrypts at build time: `CPY_HSTR("x")` is rewritten
+into a per-site XOR array decoded in place at the call site, so the plaintext never reaches the
+binary. Fingerprints found in the first 200 KB of the packed EXE:
+
+```text
+off    CPYZMB1  CPYZMB2  RtlAddFunctionTable  IsDebuggerPresent
+full   IsDebuggerPresent
+```
+
+The survivor is the static CRT's own `KERNEL32!IsDebuggerPresent` import, not loader code.
+Removing it needs import-table rewriting (`GetModuleFileName`/`CreateFileW`/... resolved by
+hash), which is the next layer, not this one.
+
+**Anti-debug** probes `PEB.BeingDebugged`, `ProcessDebugPort` / `ProcessDebugObjectHandle`,
+`CheckRemoteDebuggerPresent` and the DR7 hardware-breakpoint bits, hides the thread with
+`NtSetInformationThread(ThreadHideFromDebugger)` first, and reacts through a computed spin sink
+rather than `ExitProcess` — a kill is a one-byte patch target, a sink is not. It is armed at the
+two points worth protecting: before the runtime blob is decrypted and before the program blob is
+decrypted and mapped. `CPYTHONIZER_ONEFILE_NOAD=1` disables it at runtime so you can debug your
+own build under a debugger.
+
+```powershell
+python -m cpythonizer vs-build main.py --name Hello --zombie --lzma2 --release --guard full
+```
 
 ### Proof: Better Than Nuitka (Decompiler Test)
 A memory-dump / hook-based Python decompiler

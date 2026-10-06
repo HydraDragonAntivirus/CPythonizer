@@ -313,7 +313,8 @@ def build(entry: str | Path, name: str | None = None, dist: str | Path = "dist",
           keep_pdb: bool = False, compress: str = "none",
           lzma_preset: int = 9, lzma_extreme: bool = True,
           encrypt: bool = True, obfuscate: bool = False,
-          zombie: bool = False, antidump: bool = True) -> Path:
+          zombie: bool = False, antidump: bool = True,
+          guard: str = "off") -> Path:
     """Full pipeline: Cython --embed -> .vcxproj/.sln -> MSBuild -> EXE+PDB.
 
     With onefile=True the program and its runtime are staged under build/ and
@@ -454,7 +455,7 @@ def build(entry: str | Path, name: str | None = None, dist: str | Path = "dist",
                 release_mode=release, noconsole=noconsole,
                 keep_pdb=keep_pdb, compress=compress,
                 lzma_preset=lzma_preset, lzma_extreme=lzma_extreme,
-                encrypt=encrypt, antidump=antidump,
+                encrypt=encrypt, antidump=antidump, guard=guard,
             )
         from .onefile import assemble
         return assemble(stage_dir, app_name, work, msbuild, install.release,
