@@ -61,6 +61,7 @@ def cmd_vs_build(args: argparse.Namespace) -> int:
         release=getattr(args, "release", False),
         noconsole=getattr(args, "noconsole", False),
         keep_pdb=getattr(args, "keep_pdb", False),
+        compress="lzma2" if (getattr(args, "lzma2", False) or getattr(args, "compress", None) == "lzma2") else "none",
     )
     print(out)
     return 0
@@ -91,6 +92,10 @@ def build_parser() -> argparse.ArgumentParser:
                    help="Generate embedded main() entrypoint via cython --embed (default: True)")
     v.add_argument("--onefile", action="store_true",
                    help="Ship one self-extracting EXE: unpacks to a random %%TEMP%% folder, runs under its original name, cleans up")
+    v.add_argument("--lzma2", action="store_true", default=False,
+                   help="Compress onefile payload with LZMA2 (preset 9 + extreme) for maximum compression / minimum EXE size")
+    v.add_argument("--compress", choices=["none", "lzma2"], default=None,
+                   help="Onefile compression algorithm (none or lzma2)")
     v.add_argument("--icon", default=None,
                    help="Application icon file (.ico or .png; PNG files are converted automatically)")
     v.add_argument("--include-package", "--package", dest="include_packages", action="append", default=[],

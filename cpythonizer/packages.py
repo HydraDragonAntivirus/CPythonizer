@@ -10,31 +10,37 @@ import sys
 from pathlib import Path
 
 
-def scan_imports(entry_file: Path) -> set[str]:
-    """Scan entry file for top-level module imports using AST."""
-    if not entry_file.is_file():
-        return set()
-
-    try:
-        tree = ast.parse(entry_file.read_text(encoding="utf-8", errors="replace"))
-    except Exception:
-        return set()
+def scan_imports(files: list[Path] | Path, exclude_names: set[str] | None = None) -> set[str]:
+    """Scan entry and local files for top-level module imports using AST."""
+    if isinstance(files, Path):
+        file_list = [files]
+    else:
+        file_list = list(files)
 
     imported: set[str] = set()
-    for node in ast.walk(tree):
-        if isinstance(node, ast.Import):
-            for alias in node.names:
-                top = alias.name.split(".")[0]
-                imported.add(top)
-        elif isinstance(node, ast.ImportFrom):
-            if node.module and node.level == 0:
-                top = node.module.split(".")[0]
-                imported.add(top)
+    for f in file_list:
+        if not f.is_file():
+            continue
+        try:
+            tree = ast.parse(f.read_text(encoding="utf-8", errors="replace"))
+        except Exception:
+            continue
 
-    # Exclude standard library modules and built-ins
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Import):
+                for alias in node.names:
+                    top = alias.name.split(".")[0]
+                    imported.add(top)
+            elif isinstance(node, ast.ImportFrom):
+                if node.module and node.level == 0:
+                    top = node.module.split(".")[0]
+                    imported.add(top)
+
+    # Exclude standard library modules, built-ins, and local module names
     stdlib = getattr(sys, "stdlib_module_names", set())
     builtins = set(sys.builtin_module_names)
-    custom = {name for name in imported if name not in stdlib and name not in builtins}
+    exclude = (exclude_names or set()) | stdlib | builtins
+    custom = {name for name in imported if name not in exclude}
     return custom
 
 
