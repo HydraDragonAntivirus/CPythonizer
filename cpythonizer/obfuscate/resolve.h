@@ -177,32 +177,41 @@ __declspec(noinline) static void *obfh_own_import(const char *want)
 }
 
 /* ------------------------------------------------------------------ */
-/*  export directory walk                                             */
+/*  export directory walk, including forwarded exports                */
 /* ------------------------------------------------------------------ */
 
 typedef struct obfh_exports {
-    unsigned char *names;     /* array of RVA */
-    unsigned char *ords;      /* array of WORD indexes */
-    unsigned char *funcs;     /* array of RVA */
+    unsigned char *names;      /* array of RVAs */
+    unsigned char *ords;       /* array of WORD indexes */
+    unsigned char *funcs;      /* array of RVAs */
+    unsigned char *dir_base;   /* IMAGE_EXPORT_DIRECTORY */
+    unsigned dir_rva;
+    unsigned dir_size;
     unsigned count;
 } obfh_exports;
 
 __declspec(noinline) static int obfh_exports_open(void *base, obfh_exports *out)
 {
     unsigned char *d = (unsigned char *)base;
-    unsigned nt_off, edir_rva, edir_size;
+    unsigned nt_off, edir_rva, edir_size, pe_size;
     unsigned char *edir;
 
     if (!base || *(unsigned short *)d != 0x5A4D)
         return 0;
     nt_off = *(unsigned *)(d + 0x3C);
-    if (*(unsigned *)(d + nt_off) != 0x00004550)
+    if (nt_off < 0x40 || *(unsigned *)(d + nt_off) != 0x00004550)
         return 0;
     if (*(unsigned short *)(d + nt_off + 0x18) != 0x020B)
         return 0;
+    pe_size = *(unsigned *)(d + nt_off + 0x18 + 0x38);
     edir_rva = *(unsigned *)(d + nt_off + 0x18 + 0x70);
     edir_size = *(unsigned *)(d + nt_off + 0x18 + 0x70 + 4);
-    if (!edir_rva || !edir_size || edir_size > 0x10000)
+    /* Bound by the image, not by a guessed constant: ntdll's export
+       directory alone is larger than 64 KiB, and a fixed cap silently
+       rejects exactly the modules that matter most for forwarders. */
+    if (!edir_rva || !edir_size || pe_size < 0x1000)
+        return 0;
+    if (edir_rva >= pe_size || edir_size > pe_size - edir_rva)
         return 0;
 
     edir = obfh_rva(base, edir_rva);
@@ -212,27 +221,51 @@ __declspec(noinline) static int obfh_exports_open(void *base, obfh_exports *out)
     out->funcs = obfh_rva(base, *(unsigned *)(edir + 28));
     out->names = obfh_rva(base, *(unsigned *)(edir + 32));
     out->ords = obfh_rva(base, *(unsigned *)(edir + 36));
+    out->dir_base = edir;
+    out->dir_rva = edir_rva;
+    out->dir_size = edir_size;
     return 1;
 }
 
-__declspec(noinline) static void *obfh_export_addr(void *base,
-                                                   const obfh_exports *ex,
-                                                   unsigned index)
+__declspec(noinline) static const char *obfh_export_name(void *base,
+                                                        const obfh_exports *ex,
+                                                        unsigned index)
 {
-    unsigned ord = *(unsigned short *)(ex->ords + index * 2);
-    unsigned rva;
-
-    if (ord >= ex->count)
+    if (index >= ex->count)
         return NULL;
-    rva = *(unsigned *)(ex->funcs + ord * 4);
-    if (!rva)
-        return NULL;
-    return obfh_rva(base, rva);
+    return (const char *)obfh_rva(base, *(unsigned *)(ex->names + index * 4));
 }
 
-/* ------------------------------------------------------------------ */
-/*  the resolver itself                                                */
-/* ------------------------------------------------------------------ */
+__declspec(noinline) static unsigned obfh_export_rva(const obfh_exports *ex,
+                                                     unsigned index)
+{
+    unsigned ord;
+
+    if (index >= ex->count)
+        return 0;
+    ord = *(unsigned short *)(ex->ords + index * 2);
+    if (ord >= ex->count)
+        return 0;
+    return *(unsigned *)(ex->funcs + ord * 4);
+}
+
+/*
+ * On Windows 11 a large part of kernel32 is *forwarded*: the function RVA does
+ * not point at code, it points at an ASCII "MODULE.Function" string inside the
+ * export directory. Handing that address back as a function pointer produces a
+ * binary that works until the one call that jumps into the string table - the
+ * classic "works everywhere except under verbose" symptom. Follow it instead.
+ */
+__declspec(noinline) static int obfh_is_forwarder(const obfh_exports *ex,
+                                                  unsigned rva)
+{
+    const char *s;
+
+    if (rva < ex->dir_rva || rva >= ex->dir_rva + ex->dir_size)
+        return 0;
+    s = (const char *)(ex->dir_base + (rva - ex->dir_rva));
+    return s[0] && s[0] != '#';
+}
 
 typedef void *(WINAPI *obfh_get_module_fn)(LPCWSTR);
 typedef void *(WINAPI *obfh_load_module_fn)(LPCWSTR, void *, unsigned long);
@@ -245,6 +278,75 @@ typedef void *(WINAPI *obfh_load_module_fn)(LPCWSTR, void *, unsigned long);
  */
 static HMODULE(WINAPI *volatile obfh_boot_module)(LPCWSTR) = GetModuleHandleW;
 static HMODULE(WINAPI *volatile obfh_boot_load)(LPCWSTR, void *, DWORD) = LoadLibraryExW;
+
+__declspec(noinline) static void *obfh_module_ascii(const char *name8,
+                                                    obfh_get_module_fn get_module,
+                                                    obfh_load_module_fn load_module)
+{
+    wchar_t wide[64];
+    size_t i = 0;
+    void *m;
+
+    while (name8[i] && i + 1 < sizeof(wide) / sizeof(wide[0])) {
+        char c = name8[i++];
+
+        wide[i - 1] = (wchar_t)(unsigned char)((c >= 'A' && c <= 'Z') ? c - 'A' + 'a' : c);
+    }
+    wide[i] = 0;
+    m = get_module(wide);
+    if (!m && load_module)
+        m = load_module(wide, NULL, 0x800 /* SYSTEM32 */);
+    return m;
+}
+
+/* One level of forwarding is the norm; the loop bound keeps a cycle harmless. */
+__declspec(noinline) static void *obfh_export_addr(void *base,
+                                                   const obfh_exports *ex,
+                                                   unsigned index,
+                                                   obfh_get_module_fn get_module,
+                                                   obfh_load_module_fn load_module,
+                                                   unsigned depth)
+{
+    unsigned rva;
+    const char *fwd;
+    const char *dot;
+    char modname[64];
+    size_t n = 0;
+    void *target;
+    obfh_exports tex;
+    unsigned i;
+
+    if (depth > 3)
+        return NULL;
+    rva = obfh_export_rva(ex, index);
+    if (!rva)
+        return NULL;
+    if (!obfh_is_forwarder(ex, rva))
+        return obfh_rva(base, rva);
+
+    fwd = (const char *)(ex->dir_base + (rva - ex->dir_rva));
+    dot = fwd;
+    while (*dot && *dot != '.' && n + 1 < sizeof(modname))
+        modname[n++] = *dot++;
+    modname[n] = 0;
+    if (*dot != '.')
+        return NULL;
+
+    target = obfh_module_ascii(modname, get_module, load_module);
+    if (!target || !obfh_exports_open(target, &tex))
+        return NULL;
+    for (i = 0; i < tex.count; i++) {
+        const char *name = obfh_export_name(target, &tex, i);
+
+        if (name && obfh_streq_ci(name, dot + 1))
+            return obfh_export_addr(target, &tex, i, get_module, load_module, depth + 1);
+    }
+    return NULL;
+}
+
+/* ------------------------------------------------------------------ */
+/*  the resolver itself                                                */
+/* ------------------------------------------------------------------ */
 
 /* Hash an ASCII-only wide string byte by byte, so no conversion is needed. */
 __declspec(noinline) static unsigned obfh_hash_wide(const wchar_t *w, unsigned key)
@@ -277,9 +379,6 @@ __declspec(noinline) static unsigned obfh_hash_qualified_wide(const wchar_t *mod
  *   slots        out: function pointers (also used as scratch while decrypting)
  *   modules      wide module names, already decrypted by the caller
  */
-/*
- * Forced bootstrap entries live just above, in this file.
- */
 __declspec(noinline) static int obfh_resolve_table(const unsigned *table,
                                                   void **slots, unsigned count,
                                                   unsigned table_key,
@@ -299,7 +398,7 @@ __declspec(noinline) static int obfh_resolve_table(const unsigned *table,
         slots[i] = NULL;
     }
 
-    /* Prefer the IAT slot (it exists because the symbols above are referenced);
+    /* Prefer the IAT slot (the symbols above are referenced, so it exists);
        fall back to the direct pointer if the import was optimised away. */
     get_module = (obfh_get_module_fn)obfh_own_import(CPY_HSTR("GetModuleHandleW"));
     if (!get_module)
@@ -323,13 +422,17 @@ __declspec(noinline) static int obfh_resolve_table(const unsigned *table,
 
         module_hash = obfh_hash_wide(modules[m], hash_key);
         for (n = 0; n < ex.count && left; n++) {
-            const char *name = (const char *)obfh_rva(base, *(unsigned *)(ex.names + n * 4));
-            unsigned h = obfh_hash_qualified_wide(modules[m], module_hash, name);
+            const char *name = obfh_export_name(base, &ex, n);
+            unsigned h;
 
+            if (!name)
+                continue;
+            h = obfh_hash_qualified_wide(modules[m], module_hash, name);
             for (i = 0; i < count; i++) {
                 if (slots[i] || want[i] != h)
                     continue;
-                slots[i] = obfh_export_addr(base, &ex, n);
+                slots[i] = obfh_export_addr(base, &ex, n, get_module,
+                                            load_module, 0);
                 if (slots[i])
                     left--;
                 break;

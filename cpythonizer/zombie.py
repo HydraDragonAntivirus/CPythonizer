@@ -170,7 +170,6 @@ static const unsigned char K2_MASKED[32] = { $K2_MASKED };
 static const unsigned char K2_IV[16]     = { $K2_IV };
 
 static volatile DWORD g_child = 0;
-static unsigned char *g_image;      /* mapped program, for the crash locator */
 static int g_verbose = -1;
 static int g_antidump = -1;
 
@@ -958,7 +957,6 @@ static int run_program(const unsigned char *pe, size_t pe_len,
         fail(L"cannot allocate the program image");
         return 1;
     }
-    g_image = base;
 
     memcpy(base, pe, size_of_headers);
     {
@@ -1041,24 +1039,74 @@ static BOOL WINAPI on_ctrl(DWORD type)
     return FALSE;
 }
 
-/* Verbose-only crash locator: says which image the fault happened in. */
+/* ------------------------------------------------------------------ */
+/*  crash locator (verbose only)                                       */
+/*                                                                    */
+/*  Deliberately minimal. The first version used fwprintf,             */
+/*  GetModuleHandleExW and a 512 byte buffer, and it turned any        */
+/*  first-chance exception raised inside the program (or inside the     */
+/*  loader) into a fatal access violation of its own: re-entering the   */
+/*  CRT and the loader data from an exception handler is exactly what   */
+/*  you must not do. So: no CRT, no loader APIs, ~64 bytes of stack, a */
+/*  static message buffer, and only genuine faults are reported -       */
+/*  Python raises plenty of first-chance exceptions that are none of    */
+/*  the analyser's business.                                           */
+/* ------------------------------------------------------------------ */
+
+#define CPY_FAULT_ACCESS 0xC0000005ul
+#define CPY_FAULT_ILLEGAL 0xC000001Dul
+#define CPY_FAULT_STACK 0xC00000FDul
+#define CPY_FAULT_FAILFAST 0xC0000409ul
+#define CPY_FAULT_BREAKPOINT 0x80000003ul
+
+__declspec(noinline) static void raw_report(const wchar_t *msg, unsigned chars)
+{
+    HANDLE err = GetStdHandle(STD_ERROR_HANDLE);
+    DWORD written = 0;
+
+    if (err && err != INVALID_HANDLE_VALUE)
+        WriteFile(err, msg, chars, &written, NULL);
+}
+
+__declspec(noinline) static wchar_t *put_hex(wchar_t *p, unsigned long v)
+{
+    static const wchar_t hex[] = L"0123456789abcdef";
+    wchar_t tmp[8];
+    int n = 0;
+
+    do {
+        tmp[n++] = hex[v & 0xF];
+        v >>= 4;
+    } while (v && n < 8);
+    while (n)
+        *p++ = tmp[--n];
+    return p;
+}
+
 static LONG WINAPI on_exception(PEXCEPTION_POINTERS ep)
 {
-    BYTE *rip = (BYTE *)ep->ContextRecord->Rip;
-    HMODULE mod = NULL;
-    wchar_t path[MAX_PATH];
-    int in_image = g_image && rip >= g_image && rip < g_image + MAX_IMAGE;
+    static wchar_t msg[80];
+    unsigned long code;
+    wchar_t *p;
 
-    path[0] = L'\0';
-    if (GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS |
-                           GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
-                           (LPCWSTR)rip, &mod))
-        GetModuleFileNameW(mod, path, MAX_PATH);
-    sayf(L"exception 0x%08lx rip 0x%p in %s +0x%x%s",
-         (DWORD)ep->ExceptionRecord->ExceptionCode, (void *)rip,
-         path[0] ? path : L"?",
-         mod ? (DWORD)(rip - (BYTE *)mod) : 0,
-         in_image ? " (inside the program image)" : "");
+    if (!ep || !ep->ExceptionRecord)
+        return EXCEPTION_CONTINUE_SEARCH;
+    code = (unsigned long)ep->ExceptionRecord->ExceptionCode;
+    if (code != CPY_FAULT_ACCESS && code != CPY_FAULT_ILLEGAL &&
+        code != CPY_FAULT_STACK && code != CPY_FAULT_FAILFAST &&
+        code != CPY_FAULT_BREAKPOINT)
+        return EXCEPTION_CONTINUE_SEARCH;
+
+    p = msg;
+    memcpy(p, L"[cpythonizer] program image fault: 0x", 34 * sizeof(wchar_t));
+    p += 34;
+    p = put_hex(p, code);
+    memcpy(p, L" at 0x", 6 * sizeof(wchar_t));
+    p += 6;
+    p = put_hex(p, ep->ContextRecord ? (unsigned long)ep->ContextRecord->Rip : 0);
+    *p++ = L'\r';
+    *p++ = L'\n';
+    raw_report(msg, (unsigned)(p - msg));
     return EXCEPTION_CONTINUE_SEARCH;
 }
 
@@ -1277,7 +1325,7 @@ static int role_zombie(const wchar_t *self, int argc, wchar_t **argv)
         return 1;
     }
     sayf(L"program blob ready: %lu bytes", (unsigned long)program_len);
-    if (verbose())
+    if (verbose() && !env_flag(CPY_HWSTR("CPYTHONIZER_ONEFILE_NOVEH")))
         AddVectoredExceptionHandler(1,
                                     (PVECTORED_EXCEPTION_HANDLER)on_exception);
 
