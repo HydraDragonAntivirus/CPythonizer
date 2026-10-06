@@ -51,13 +51,14 @@ def cmd_vs_build(args: argparse.Namespace) -> int:
     from .cython_vs import build as vs_build
 
     compress = "lzma2" if (getattr(args, "lzma2", False) or getattr(args, "compress", None) == "lzma2") else "none"
+    zombie = getattr(args, "zombie", False)
     out = vs_build(
         entry=args.entry,
         name=args.name,
         dist=args.dist,
         vs=args.vs,
         embed=getattr(args, "embed", True),
-        onefile=getattr(args, "onefile", False),
+        onefile=getattr(args, "onefile", False) or zombie,
         icon=getattr(args, "icon", None),
         include_packages=getattr(args, "include_packages", None),
         release=getattr(args, "release", False),
@@ -68,6 +69,8 @@ def cmd_vs_build(args: argparse.Namespace) -> int:
         lzma_extreme=getattr(args, "lzma_extreme", True),
         encrypt=getattr(args, "encrypt", True),
         obfuscate=getattr(args, "obfuscate", False),
+        zombie=zombie,
+        antidump=getattr(args, "antidump", True),
     )
     print(out)
     return 0
@@ -154,6 +157,11 @@ def build_parser() -> argparse.ArgumentParser:
                    help="Generate embedded main() entrypoint via cython --embed (default: True)")
     v.add_argument("--onefile", action="store_true",
                    help="Ship one self-extracting EXE: unpacks to a random %%TEMP%% folder, runs under its original name, cleans up")
+    v.add_argument("--zombie", action="store_true",
+                   help="Zombie loader (implies --onefile): the runtime is dropped to %%TEMP%%, but the program "
+                        "itself is mapped in RAM and NEVER written to disk - the dropped EXE is an empty shell")
+    v.add_argument("--no-antidump", dest="antidump", action="store_false", default=True,
+                   help="Zombie mode: keep SizeOfImage intact instead of blanking it (anti-dump off)")
     v.add_argument("--encrypt", action=argparse.BooleanOptionalAction, default=True,
                    help="Encrypt onefile payload with per-build random AES-256 key (default: True, use --no-encrypt to disable)")
     v.add_argument("--lzma2", action="store_true", default=False,

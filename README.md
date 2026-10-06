@@ -21,7 +21,9 @@ python -m cpythonizer vs-build examples/single_hello.py --name Hello --dist dist
 
 Options:
 - `--onefile`: Folds the program, runtime (`python314.dll`), stdlib (`python314.zip`), extension modules, and third-party packages into a single self-contained `.exe` (see below).
+- `--zombie`: Zombie loader (implies `--onefile`): the runtime is dropped to `%TEMP%` as real files, but the **program itself is mapped in RAM and never written to disk** - the dropped EXE is an empty shell (see below).
 - `--encrypt` / `--no-encrypt`: Encrypts the onefile payload with a unique random AES-256 key per build (default: enabled).
+- `--no-antidump`: Zombie mode: keep `SizeOfImage` intact instead of blanking it (anti-dump off, default: on).
 - `--lzma2` / `--compress lzma2`: Compresses the onefile payload using **LZMA2 compression**.
 - `--lzma-preset <0..9>`: Configurable LZMA2 compression level (default: `9`).
 - `--lzma-extreme` / `--no-lzma-extreme`: Enable/disable LZMA2 extreme preset for extra compression (default: enabled).
@@ -98,6 +100,62 @@ The command line is forwarded verbatim, `argv[0]` is rewritten to the shipped EX
 working directory is left alone. Unpacking ~29 MB costs about 0.25 s per launch.
 Debug switches: `CPYTHONIZER_ONEFILE_VERBOSE=1` prints the temp folder, and
 `--cpythonizer-keep` (or `CPYTHONIZER_ONEFILE_KEEP=1`) keeps it for inspection.
+
+### Zombie Loader (`--zombie`): the program is never written to disk
+
+`--onefile` drops the whole staged folder to `%TEMP%`, **the program EXE included**.
+`--zombie` drops only what genuinely must exist as a file and keeps the program in RAM:
+
+```powershell
+python -m cpythonizer vs-build main.py --name Hello --zombie --lzma2 --release
+```
+
+The shipped EXE is `[ stub ][ runtime blob ][ program blob ][ 56 byte trailer ]`, and the
+stub is **one binary with two roles**, picked by the trailer magic (`CPYZMB1` / `CPYZMB2`):
+
+1. **Droper (the shipped EXE)** - decrypts + unpacks the runtime blob
+   (`python314.dll`, every `.pyd`, `python314.zip`, `vcruntime140.dll`, `libcrypto-3.dll`, …)
+   into `%TEMP%\<app>-<random>\`, then writes the **zombie** next to it: its own stub bytes
+   + the untouched program blob + a `CPYZMB2` trailer, named `Hello.exe`. It runs the zombie,
+   waits, deletes the folder and forwards the exit code.
+2. **Zombie (`%TEMP%\...\<app>.exe`)** - decrypts the program PE, maps it in memory
+   (headers, sections, relocations, imports, section protections, `.pdata` for x64
+   unwinding) and calls its `wmainCRTStartup`.
+
+Because the zombie is produced by copying the droper's own prefix, no second payload is
+embedded anywhere, and **the dropped EXE holds zero instructions of the real program** —
+only the loader plus the still-encrypted blob:
+
+```text
+build/onefile_ProbeZ/ProbeZ.exe   125 KB  real program: "Py_Initialize", the .text, the imports
+%TEMP%\ProbeZ-XXXX\ProbeZ.exe      228 KB  zombie:       no program code, no program imports
+dist/ProbeZ/ProbeZ.exe             15 MB   shipped:       no program code either
+```
+
+**Why the DLLs are dropped but the EXE is not.** A manually mapped module is invisible to
+the loader, so everything that expects a real on-disk module breaks: the import graph,
+extension module loads, `sys.prefix` discovery (CPython looks for `python314.zip` relative to
+the **process image**, which is why the zombie must run from `%TEMP%`), TLS and CRT
+bookkeeping. Do that to every DLL and the program cannot start at all. The EXE is the one
+image nothing else loads, so it is the one that can live purely in RAM - and once its DLLs
+sit next to the zombie, the mapped program boots exactly like the ordinary staged build.
+`tasklist` still shows `Hello.exe` and `sys.argv[0]` / `sys.executable` still point at the
+distributed file.
+
+**Anti-dump — `SizeOfImage` only.** After mapping, the loader blanks *just*
+`OptionalHeader.SizeOfImage`. That is the field every memory dumper and
+`GetModuleInformation` uses to size an image, so the dump comes out empty. Nothing else is
+touched: the DOS/NT headers, the section table and `.pdata` must stay valid for the CRT, the
+x64 unwinder and CPython's own module bookkeeping - wiping the header (as most loaders do)
+breaks the program instead of protecting it. `--no-antidump` disables it at build time,
+`CPYTHONIZER_ONEFILE_NOANTIDUMP=1` at runtime.
+
+Both blobs are AES-256-CBC encrypted with a fresh random key/IV/key-mask **per build**
+(two independent sets, one per blob) and CRC32-checked after decryption; `--lzma2` compresses
+them with LZMA2 preset 9. The debug switches of `--onefile` work unchanged
+(`CPYTHONIZER_ONEFILE_VERBOSE=1`, `--cpythonizer-keep`), and in verbose mode the loader prints
+what it maps, which imports it resolved, and — if the mapped program ever faults — the faulting
+address and the module it belongs to.
 
 ### Proof: Better Than Nuitka (Decompiler Test)
 A memory-dump / hook-based Python decompiler

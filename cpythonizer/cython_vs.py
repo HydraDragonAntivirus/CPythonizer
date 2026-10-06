@@ -312,11 +312,14 @@ def build(entry: str | Path, name: str | None = None, dist: str | Path = "dist",
           release: bool = False, noconsole: bool = False,
           keep_pdb: bool = False, compress: str = "none",
           lzma_preset: int = 9, lzma_extreme: bool = True,
-          encrypt: bool = True, obfuscate: bool = False) -> Path:
+          encrypt: bool = True, obfuscate: bool = False,
+          zombie: bool = False, antidump: bool = True) -> Path:
     """Full pipeline: Cython --embed -> .vcxproj/.sln -> MSBuild -> EXE+PDB.
 
     With onefile=True the program and its runtime are staged under build/ and
     the result is a single self-extracting EXE in dist/<app>/<app>.exe.
+    With zombie=True the runtime is dropped to %TEMP% as usual, but the
+    program itself is mapped in RAM and never reaches the disk.
     """
     from .python_env import ensure_python314, PyDev
     from .vs import ensure_vs
@@ -443,6 +446,16 @@ def build(entry: str | Path, name: str | None = None, dist: str | Path = "dist",
 
     # 6) Onefile: fold program + runtime into a single self-extracting EXE.
     if onefile:
+        if zombie:
+            from .zombie import assemble as zombie_assemble
+            return zombie_assemble(
+                stage_dir, app_name, work, msbuild, install.release,
+                out_dir / f"{app_name}.exe", icon=ico_file,
+                release_mode=release, noconsole=noconsole,
+                keep_pdb=keep_pdb, compress=compress,
+                lzma_preset=lzma_preset, lzma_extreme=lzma_extreme,
+                encrypt=encrypt, antidump=antidump,
+            )
         from .onefile import assemble
         return assemble(stage_dir, app_name, work, msbuild, install.release,
                         out_dir / f"{app_name}.exe", icon=ico_file,
