@@ -182,26 +182,58 @@ def obfuscate_source(source: str, rename_funcs: bool = True,
 
 
 class Encrypt:
-    """Base64 source code encryptor/packer."""
+    """AES-256-CBC source code encryptor/packer."""
 
     def __init__(self):
         self.YELLOW, self.GREEN = '\33[93m', '\033[1;32m'
         self.text = ""
         self.enc_txt = ""
 
+    def generate_key_iv(self) -> tuple[bytes, bytes]:
+        try:
+            from Crypto.Random import get_random_bytes
+            key = get_random_bytes(32)  # 256-bit anahtar
+            iv = get_random_bytes(16)   # 128-bit IV
+        except Exception:
+            import os
+            key = os.urandom(32)
+            iv = os.urandom(16)
+        return key, iv
+
+    def encrypt_text(self, text: str, key: bytes, iv: bytes) -> bytes:
+        from Crypto.Cipher import AES
+        from Crypto.Util.Padding import pad
+        cipher = AES.new(key, AES.MODE_CBC, iv)
+        ciphertext = cipher.encrypt(pad(text.encode("utf-8"), AES.block_size))
+        return base64.b64encode(iv + ciphertext)
+
     def encrypt(self, filename: str | Path):
         print(f"\n{self.YELLOW}[*] Encrypting Source Codes...")
         filename = str(filename)
+        self.text = ""
         with open(filename, "r", encoding="utf-8") as f:
             lines_list = f.readlines()
             for lines in lines_list:
                 self.text += lines
 
-            encoded = self.text.encode("utf-8")
-            self.enc_txt = base64.b64encode(encoded)
+            key, iv = self.generate_key_iv()
+            self.enc_txt = self.encrypt_text(self.text, key, iv)
 
         with open(filename, "w", encoding="utf-8") as f:
-            f.write(f"import base64; exec(base64.b64decode({self.enc_txt}))")
+            f.write(
+                f"from Crypto.Cipher import AES\n"
+                f"from Crypto.Util.Padding import unpad\n"
+                f"import base64\n\n"
+                f"def decrypt_text(encrypted_text, key):\n"
+                f"    encrypted_text = base64.b64decode(encrypted_text)\n"
+                f"    iv = encrypted_text[:16]\n"
+                f"    ciphertext = encrypted_text[16:]\n"
+                f"    cipher = AES.new(key, AES.MODE_CBC, iv)\n"
+                f"    decrypted_text = unpad(cipher.decrypt(ciphertext), AES.block_size)\n"
+                f"    return decrypted_text.decode()\n\n"
+                f"key = {key}\n\n"
+                f"exec(decrypt_text({self.enc_txt}, key))\n"
+            )
 
         print(f"{self.GREEN}[+] Operation Completed Successfully!\n")
 

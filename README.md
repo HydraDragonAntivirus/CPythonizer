@@ -40,7 +40,8 @@ The built-in obfuscator safely transforms Python sources before or during Cython
 - **Comment Stripper**: Tokenize-based stripping of inline (`# ...`) and standalone comments without altering strings, raw strings, docstrings or regexes.
 - **AST Function Name Randomization**: Automatically renames function definitions and internal callers to randomized identifiers (`_cpx_fn_<hex>`) via Python AST.
 - **Random Decoy Step Comments**: Injects randomized decoy step comment lines (`# [cpx-step: <token>]`) before statements.
-- **Base64 Exec Wrapper (`Encrypt` class)**: Compresses/encodes sources into self-executing `import base64; exec(base64.b64decode(...))` scripts.
+- **AES-256-CBC Self-Decrypting Wrapper (`Encrypt` class)**: Automatically generates fresh 256-bit AES keys & 128-bit IVs, encrypts source codes, and outputs self-executing `exec(decrypt_text(...))` scripts.
+- **Base64 Exec Wrapper**: Compresses/encodes sources into self-executing `import base64; exec(base64.b64decode(...))` scripts.
 
 ```powershell
 # Strip comments
@@ -48,6 +49,9 @@ python -m cpythonizer obfuscate myfile.py --in-place
 
 # Full obfuscation (strip comments + rename functions via AST + insert random step comments)
 python -m cpythonizer obfuscate myfile.py --all --in-place
+
+# AES-256-CBC self-decrypting wrapper (auto key & IV generation)
+python -m cpythonizer obfuscate myfile.py --aes
 
 # Base64 exec wrapper
 python -m cpythonizer obfuscate myfile.py --b64

@@ -83,6 +83,18 @@ def cmd_obfuscate(args: argparse.Namespace) -> int:
         print(f"Error: File not found: {src_path}")
         return 1
 
+    if args.aes:
+        enc = Encrypt()
+        if args.in_place:
+            enc.encrypt(src_path)
+        else:
+            out_target = Path(args.out).resolve() if args.out else src_path.with_name(f"{src_path.stem}_aes.py")
+            shutil.copy2(src_path, out_target)
+            enc.encrypt(out_target)
+            if not args.out:
+                print(f"[cpythonizer] AES encrypted file written: {out_target}")
+        return 0
+
     if args.b64:
         enc = Encrypt()
         if args.in_place:
@@ -178,6 +190,8 @@ def build_parser() -> argparse.ArgumentParser:
                    help="Insert randomized decoy comment lines for each step")
     o.add_argument("--all", "-a", action="store_true", default=False,
                    help="Apply all steps: strip comments + rename functions + insert random step comments")
+    o.add_argument("--aes", action="store_true", default=False,
+                   help="Encrypt file with AES-256-CBC + Base64 self-decrypting wrapper (Encrypt class)")
     o.add_argument("--b64", "--base64", dest="b64", action="store_true", default=False,
                    help="Wrap file in base64 exec encoding")
     o.set_defaults(func=cmd_obfuscate)
