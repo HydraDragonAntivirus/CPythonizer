@@ -167,7 +167,7 @@ The loader is C, so it is the softest target in the package. `--guard` compiles 
 | level | what it adds |
 |---|---|
 | `off` (default) | plain loader, every literal visible |
-| `basic` | compile-time string encryption, anti-debug at both decrypt sites, flattened role dispatch |
+| `basic` | compile-time string encryption, hidden imports, anti-debug at both decrypt sites, flattened role dispatch |
 | `full` | `basic` + hardware-breakpoint probe (DR7) and fake protector sections (`.aspack`, `.adata`, `__wibu00`) |
 
 **Why a port instead of the upstream header.** obfus.h does not support MSVC by design: it
@@ -184,8 +184,28 @@ same shape OLLVM's flattening produces: one switch inside one loop with an opaqu
 **String encryption is real, not cosmetic.** obfus.h's `HIDE_STRING` only keeps a literal out of
 the *data sections* — MSVC still emits the bytes as `.text` immediates, so a raw grep over the
 file finds them anyway. The port therefore encrypts at build time: `CPY_HSTR("x")` is rewritten
-into a per-site XOR array decoded in place at the call site, so the plaintext never reaches the
-binary. Fingerprints found in the first 200 KB of the packed EXE:
+into a per-site XOR array decoded at the call site, so the plaintext never reaches the binary.
+
+**Hidden imports.** `basic`/`full` resolve all 36 Win32 entry points the loader uses at run time
+instead of importing them: `PEB->ImageBaseAddress` gives the loader's own base, its own import
+directory yields `GetModuleHandleW`/`LoadLibraryExW` (forced references — the linker drops an
+import nobody uses), and every other function is found by walking kernel32's and bcrypt.dll's
+export directories and matching a keyed hash of `"<module>!<function>"`. No function name exists
+anywhere in the file, and the expected-hash table is itself stored encrypted. Import table of
+the packed stub, measured:
+
+```text
+guard off            103   (96 KERNEL32 + 7 bcrypt)
+guard basic / full    76   (a plain /MT hello-world imports 76)
+```
+
+So `basic`/`full` leave the loader with **zero** Win32 imports of its own: no `CreateProcessW`,
+no `VirtualAlloc`, no `BCryptDecrypt`, no `LoadLibraryW`, no `GetThreadContext`,
+no `AddVectoredExceptionHandler`. What remains is the static CRT's own list (heap, TLS, stdio),
+which no work on the loader can remove — only dropping the CRT entirely could, and the stub
+needs `malloc`/`memcpy`/`fwprintf`. The two bootstrap names plus the CRT's 74 are the floor.
+
+Fingerprints found in the first 200 KB of the packed EXE:
 
 ```text
 off    CPYZMB1  CPYZMB2  RtlAddFunctionTable  IsDebuggerPresent
@@ -193,8 +213,6 @@ full   IsDebuggerPresent
 ```
 
 The survivor is the static CRT's own `KERNEL32!IsDebuggerPresent` import, not loader code.
-Removing it needs import-table rewriting (`GetModuleFileName`/`CreateFileW`/... resolved by
-hash), which is the next layer, not this one.
 
 **Anti-debug** probes `PEB.BeingDebugged`, `ProcessDebugPort` / `ProcessDebugObjectHandle`,
 `CheckRemoteDebuggerPresent` and the DR7 hardware-breakpoint bits, hides the thread with

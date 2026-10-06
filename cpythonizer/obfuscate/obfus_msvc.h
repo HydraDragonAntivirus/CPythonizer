@@ -52,6 +52,14 @@
 #include <intrin.h>
 #include <stdlib.h>
 #include <string.h>
+#include "literals.h"
+
+#ifndef CPY_HSTR
+#define CPY_HSTR(s) s
+#endif
+#ifndef CPY_HWSTR
+#define CPY_HWSTR(s) L##s
+#endif
 
 #ifdef __cplusplus
 extern "C" {
@@ -168,47 +176,6 @@ __declspec(noinline) static char *obfh_hidden(char *s)
 }
 
 #define HIDE_STRING(str) (OBFH_JUNK_COND() ? obfh_hidden(STACK_STRING("\0" str "\0")) : (str))
-
-/*
- * Compile-time string encryption (the real thing, not the stack variant).
- *
- * HIDE_STRING only keeps a literal out of the data sections - the bytes still
- * end up in .text as the immediates of the stack stores, so a raw grep over
- * the binary finds them anyway. These helpers are what removes them: the
- * build rewrites CPY_HSTR("x") into an XOR-encrypted byte array that is
- * decoded in place at the call site, so the plaintext never reaches the file.
- *
- *     obfh_decrypt_str((unsigned char[]){0x1e, 0x4b, ..., 0x00}, 0x5a, 8)
- *
- * The key is per call site, so two occurrences of the same name do not share
- * ciphertext, and every one of them decodes to a different buffer.
- */
-__declspec(noinline) static char *obfh_decrypt_str(unsigned char *buf,
-                                                  unsigned char key, size_t len)
-{
-    size_t i;
-
-    for (i = 0; i < len; i++)
-        buf[i] ^= key;
-    _ReadWriteBarrier();
-    return (char *)buf;
-}
-
-__declspec(noinline) static wchar_t *obfh_decrypt_wstr(wchar_t *buf,
-                                                       unsigned char key, size_t len)
-{
-    size_t i;
-
-    for (i = 0; i < len; i++)
-        buf[i] = (wchar_t)(((unsigned char *)buf)[i] ^ key);
-    _ReadWriteBarrier();
-    return buf;
-}
-
-/* Placeholders: cpythonizer rewrites these into encrypted arrays whenever the
-   guard is on; without the guard they stay plain literals. */
-#define CPY_HSTR(s) s
-#define CPY_HWSTR(s) L##s
 
 /* Wide stack variant; kept for API parity, see obfh_hidden_w below. */
 __declspec(noinline) static wchar_t *obfh_hidden_w(wchar_t *s)
