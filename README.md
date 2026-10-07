@@ -214,6 +214,15 @@ full   IsDebuggerPresent
 
 The survivor is the static CRT's own `KERNEL32!IsDebuggerPresent` import, not loader code.
 
+**Forwarded exports.** On Windows 11, 211 of kernel32's 1697 exports are *forwarders*: the
+export's RVA points at an ASCII `"NTDLL.RtlAddVectoredExceptionHandler"` string inside the export
+directory instead of at code. The resolver follows them (and bounds the export directory by
+`SizeOfImage` rather than a fixed cap, because ntdll's alone exceeds 64 KiB). Handling this is not
+cosmetic — `AddVectoredExceptionHandler` is one of the forwarded ones, so before this was fixed the
+loader stored a *string address* in that slot and jumped into kernel32's string table when the
+verbose crash locator was installed. The bug was invisible to a matrix that only checked exit codes,
+because the call is reached only when `CPYTHONIZER_ONEFILE_VERBOSE=1`; see `tests/` below.
+
 **Anti-debug** probes `PEB.BeingDebugged`, `ProcessDebugPort` / `ProcessDebugObjectHandle`,
 `CheckRemoteDebuggerPresent` and the DR7 hardware-breakpoint bits, hides the thread with
 `NtSetInformationThread(ThreadHideFromDebugger)` first, and reacts through a computed spin sink
@@ -225,6 +234,31 @@ own build under a debugger.
 ```powershell
 python -m cpythonizer vs-build main.py --name Hello --zombie --lzma2 --release --guard full
 ```
+
+### Tests
+
+```powershell
+python tests\test_resolver.py            # ~10 s, no build needed
+CPXP_ZOMBIE_TESTS=1 python tests\test_zombie_switches.py   # ~3 min, four MSBuild runs
+```
+
+`test_resolver.py` compiles `obfuscate/resolve.h` on its own, resolves every hidden import through
+the real table, and compares each pointer against `GetProcAddress` — an oracle that shares no code
+with the resolver. It skips cleanly when no MSVC toolchain is present.
+
+`test_zombie_switches.py` builds four variants (plain, `guard full`, `guard full --no-antidump`,
+`guard off`) and asserts the *behaviour*, not just exit codes:
+
+- the program's output is byte-identical to the unprotected build
+- `CPYTHONIZER_ONEFILE_VERBOSE=1` really prints loader diagnostics **and still exits 0**
+- `CPYTHONIZER_ONEFILE_KEEP=1` leaves the dropped runtime behind; a normal run removes it
+- the default build reports blanking `SizeOfImage`, `--no-antidump` does not, and the dropped stub
+  on disk keeps a valid one (Windows has to be able to load it)
+- `guard off` imports `bcrypt.dll`, `guard full` does not
+
+The verbose assertion is the one that matters: a loader whose verbose path crashes still runs the
+program perfectly in every other configuration, so any test that only looks at exit codes reports
+it as healthy.
 
 ### Proof: Better Than Nuitka (Decompiler Test)
 A memory-dump / hook-based Python decompiler

@@ -212,10 +212,12 @@ def check() -> list[str]:
         bad.append("default build never reported blanking SizeOfImage")
     if "anti-dump: SizeOfImage -> 0" in noad_log:
         bad.append("--no-antidump blanked SizeOfImage anyway")
-    for label, path in (("guard", guarded), ("no-antidump", noad)):
-        size = pe_size_of_image(ROOT / "build" / "onefile_ZGuard"
-                                / ("ZGuard.exe" if label == "guard" else "ZNoAd.exe"))
-        if size == 0:
+    for label, path in (("guard", ROOT / "build" / "onefile_ZGuard" / "ZGuard.exe"),
+                        ("no-antidump", ROOT / "build" / "onefile_ZNoAd" / "ZNoAd.exe")):
+        if not path.is_file():
+            bad.append(f"{label}: missing dropped stub {path}")
+            continue
+        if pe_size_of_image(path) == 0:
             bad.append(f"{label}: the dropped stub has SizeOfImage 0, so Windows "
                        f"cannot even load it")
 

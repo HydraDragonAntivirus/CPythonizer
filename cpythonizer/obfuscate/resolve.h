@@ -49,34 +49,12 @@ __declspec(noinline) static unsigned obfh_hash_step(unsigned h, unsigned char c)
     return h;
 }
 
-__declspec(noinline) static unsigned obfh_hash_name(const char *name, unsigned key)
-{
-    unsigned h = obfh_hash_init(key);
-
-    while (*name) {
-        h = obfh_hash_step(h, (unsigned char)*name++);
-        if (!h)
-            h = 1u;  /* 0 means "not found" */
-    }
-    return h ? h : 1u;
-}
-
 /*
- * Hash of "<module>!<name>". The resolver walks the exports of a known module,
- * so it only needs the qualified form; this narrow variant is here for callers
- * that hold an ASCII module name (and for verifying the Python mirror).
+ * Only the wide and qualified forms below are used: the resolver always holds a
+ * decrypted wchar_t module name and walks real export tables. A narrow ASCII
+ * variant used to live here as well, and since nothing referenced it, it was
+ * free to drift away from the Python mirror without any test noticing.
  */
-__declspec(noinline) static unsigned obfh_hash_qualified(const char *module,
-                                                         unsigned module_hash,
-                                                         const char *name)
-{
-    unsigned h = module_hash;
-
-    h = obfh_hash_step(h, '!');
-    while (*name)
-        h = obfh_hash_step(h, (unsigned char)*name++);
-    return h ? h : 1u;
-}
 
 /* ------------------------------------------------------------------ */
 /*  image helpers                                                      */
