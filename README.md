@@ -202,6 +202,38 @@ An `--icon` that the resource compiler rejects (for example `RC2176: old DIB`) n
 kills the build: the project is regenerated without the icon, the build continues, and a
 warning is printed. A missing icon beats no binary.
 
+### Console windows: `--noconsole` vs `--hide-console`
+
+A GUI-subsystem build (`--noconsole`) has no console at all, so Windows gives every **child
+process that is itself a console application** a brand new console window. That is why a Tkinter
+app whose screens each shell out once (`git`, `pip`, `where`, ...) flashes a black rectangle on
+every navigation. Measured inside a packaged build, launched the way Explorer launches it:
+
+| flags | PE subsystem | own console | console a child `cmd.exe` gets |
+|---|---|---|---|
+| `--noconsole` | GUI | none | **new window, visible** |
+| `--hide-console` | Console | present, hidden | inherits it, hidden |
+| **`--noconsole --hide-console`** | GUI | hidden, self-allocated | inherits it, hidden |
+| neither | Console | visible | inherits it, visible |
+
+`--hide-console` keeps the console and hides its window (`GetConsoleWindow` + `ShowWindow`), so
+children inherit something invisible to draw into instead of being handed a window of their own.
+Combined with `--noconsole` — the mode to use for a GUI app — the PE stays GUI, so Windows creates
+nothing at start-up and `sys.stdout` stays `None` exactly as with `--noconsole`, and the program
+allocates one hidden console (`AllocConsole` + hide) for children to inherit. The policy is applied
+to the loader stub and to the program, so neither of them can show a window the other hid.
+
+What it costs, honestly:
+
+- Windows creates the console before `main()` runs, so `--hide-console` **alone** can flash once at
+  start-up. Combined with `--noconsole` there is no such flash, since nothing is created for us.
+- A console object survives, so another process could `AttachConsole` and read what the program
+  printed. Matters only if the app prints secrets; drop `--hide-console` if that is a concern.
+- AV/EDR heuristics classify the binary as a console application rather than a GUI one.
+
+The code-level fix is still the better one where you own the source:
+`subprocess.Popen(cmd, creationflags=subprocess.CREATE_NO_WINDOW)`.
+
 ### Guard layers (`--guard basic|full`)
 
 The loader is C, so it is the softest target in the package. `--guard` compiles the stub with

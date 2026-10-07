@@ -73,6 +73,7 @@ def cmd_vs_build(args: argparse.Namespace) -> int:
         antidump=getattr(args, "antidump", True),
         guard=getattr(args, "guard", "off"),
         add_data=getattr(args, "add_data", None),
+        hide_console=getattr(args, "hide_console", False),
     )
     print(out)
     return 0
@@ -194,6 +195,10 @@ def build_parser() -> argparse.ArgumentParser:
                    help="Retain debug symbols (.pdb) even when building with --release")
     v.add_argument("--noconsole", "--windowed", dest="noconsole", action="store_true", default=False,
                    help="Hide the black console window at startup (for GUI apps like Tkinter, PyQt)")
+    v.add_argument("--hide-console", action="store_true", default=False,
+                   help="Stop child processes from flashing a console window: hide the console "
+                        "rather than removing it, so children inherit the hidden one. Combine "
+                        "with --noconsole to keep the GUI subsystem too (recommended for GUI apps)")
     v.set_defaults(func=cmd_vs_build)
 
     o = sub.add_parser("obfuscate", help="Obfuscate Python source files")

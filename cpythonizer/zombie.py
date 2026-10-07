@@ -50,6 +50,7 @@ import zlib
 from pathlib import Path
 
 from .cython_vs import SLN_TEMPLATE, build_sln
+from .consoles import inject_console_policy
 
 MAGIC_OUTER = b"CPYZMB1\0"
 MAGIC_ZOMBIE = b"CPYZMB2\0"
@@ -1677,7 +1678,8 @@ def _encrypt_literals(src: str) -> str:
 
 
 def write_stub_c(work: Path, app_name: str, k1: tuple, k2: tuple,
-                 encrypt: bool, antidump: bool, guard: str = "off") -> Path:
+                 encrypt: bool, antidump: bool, guard: str = "off",
+                 hide_console: bool = False, noconsole: bool = False) -> Path:
     """Emit the zombie stub source with its per-build key material."""
     src = STUB_C.substitute(
         CHILD_NAME=f"{app_name}.exe",
@@ -1712,13 +1714,16 @@ def write_stub_c(work: Path, app_name: str, k1: tuple, k2: tuple,
         src = _encrypt_literals(src)
     path = work / f"{app_name}_zombie.c"
     path.write_text(src, encoding="utf-8")
+    if hide_console:
+        inject_console_policy(path, noconsole=noconsole, hide_console=True,
+                              stub=True)
     return path
 
 
 def build_stub(work: Path, app_name: str, out_dir: Path, release, msbuild: Path,
                c_file: Path, rc_file: Path | None = None,
                release_mode: bool = False, noconsole: bool = False,
-               keep_pdb: bool = False) -> tuple[Path, Path | None]:
+               keep_pdb: bool = False, hide_console: bool = False) -> tuple[Path, Path | None]:
     """Compile the stub. Returns (stub_exe, stub_pdb | None)."""
     from .onefile import STUB_VCXPROJ_TEMPLATE
 
@@ -1890,7 +1895,7 @@ def assemble(stage: Path, app_name: str, work: Path, msbuild: Path, release,
              keep_pdb: bool = False, compress: str = "none",
              lzma_preset: int = 9, lzma_extreme: bool = True,
              encrypt: bool = True, antidump: bool = True,
-             guard: str = "off") -> Path:
+             guard: str = "off", hide_console: bool = False) -> Path:
     """Fold the runtime into %TEMP% and keep the program in memory only."""
     if guard not in GUARD_LEVELS:
         raise ValueError(f"guard must be one of {GUARD_LEVELS}, got {guard!r}")
@@ -1912,7 +1917,7 @@ def assemble(stage: Path, app_name: str, work: Path, msbuild: Path, release,
     k2 = _new_keys() if encrypt else (b"", b"", b"", b"", b"")
     c_file = write_stub_c(
         work, app_name, k1, k2, encrypt=encrypt, antidump=antidump,
-        guard=guard,
+        guard=guard, hide_console=hide_console, noconsole=noconsole,
     )
     stub_exe, stub_pdb = build_stub(
         work, app_name, stub_dir, release, msbuild, c_file,

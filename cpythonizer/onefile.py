@@ -30,6 +30,7 @@ import zipfile
 from pathlib import Path
 
 from .cython_vs import SLN_TEMPLATE, build_sln
+from .consoles import inject_console_policy
 
 MAGIC_RAW = b"CPYONE1\0"
 MAGIC_LZMA = b"CPYLZM2\0"
@@ -757,7 +758,8 @@ def aes_encrypt(key: bytes, iv: bytes, data: bytes) -> bytes:
 
 
 def write_stub_c(work: Path, app_name: str, mask: bytes, masked_key: bytes, iv: bytes,
-                 encrypt: bool = True) -> Path:
+                 encrypt: bool = True, hide_console: bool = False,
+                 noconsole: bool = False) -> Path:
     """Emit stub.c with per-build random AES keys and program name baked in."""
     key_mask_str = ", ".join(f"0x{b:02x}" for b in mask) if (mask and encrypt) else "0"
     masked_key_str = ", ".join(f"0x{b:02x}" for b in masked_key) if (masked_key and encrypt) else "0"
@@ -773,6 +775,9 @@ def write_stub_c(work: Path, app_name: str, mask: bytes, masked_key: bytes, iv: 
     )
     path = work / f"{app_name}_stub.c"
     path.write_text(src, encoding="utf-8")
+    if hide_console:
+        inject_console_policy(path, noconsole=noconsole, hide_console=True,
+                              stub=True)
     return path
 
 
@@ -780,10 +785,13 @@ def build_stub(work: Path, app_name: str, out_dir: Path, release,
                msbuild: Path, mask: bytes, masked_key: bytes, iv: bytes,
                rc_file: Path | None = None,
                release_mode: bool = False, noconsole: bool = False,
-               keep_pdb: bool = False, encrypt: bool = True) -> tuple[Path, Path | None]:
+               keep_pdb: bool = False, encrypt: bool = True,
+               hide_console: bool = False) -> tuple[Path, Path | None]:
     """Compile the stub. Returns (stub_exe, stub_pdb)."""
     guid = str(uuid.uuid4()).upper()
-    c_file = write_stub_c(work, app_name, mask=mask, masked_key=masked_key, iv=iv, encrypt=encrypt)
+    c_file = write_stub_c(work, app_name, mask=mask, masked_key=masked_key, iv=iv,
+                          encrypt=encrypt, hide_console=hide_console,
+                          noconsole=noconsole)
     name = f"{app_name}_stub"
     resource_item = f'    <ResourceCompile Include="{rc_file.name}" />' if rc_file else ""
     subsystem = "Windows" if noconsole else "Console"
@@ -920,7 +928,7 @@ def assemble(stage: Path, app_name: str, work: Path, msbuild: Path, release,
              release_mode: bool = False, noconsole: bool = False,
              keep_pdb: bool = False, compress: str = "none",
              lzma_preset: int = 9, lzma_extreme: bool = True,
-             encrypt: bool = True) -> Path:
+             encrypt: bool = True, hide_console: bool = False) -> Path:
     """Fold the staged program + runtime into one self-extracting EXE."""
     import os
 
@@ -950,7 +958,7 @@ def assemble(stage: Path, app_name: str, work: Path, msbuild: Path, release,
         work, app_name, stub_dir, release, msbuild,
         mask=mask, masked_key=masked_key, iv=iv,
         rc_file=stub_rc, release_mode=release_mode, noconsole=noconsole,
-        keep_pdb=keep_pdb, encrypt=encrypt,
+        keep_pdb=keep_pdb, encrypt=encrypt, hide_console=hide_console,
     )
 
     payload = work / ("payload.enc" if encrypt else ("payload.xz" if compress == "lzma2" else "payload.zip"))

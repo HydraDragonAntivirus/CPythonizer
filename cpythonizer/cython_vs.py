@@ -18,6 +18,8 @@ import uuid
 import zipfile
 from pathlib import Path
 
+from .consoles import inject_console_policy
+
 
 def prepare_icon(icon_path: str | Path | None, workdir: Path, app_name: str) -> tuple[Path | None, Path | None]:
     """Process .ico or .png into an ICO and an RC file.
@@ -432,7 +434,8 @@ def build(entry: str | Path, name: str | None = None, dist: str | Path = "dist",
           lzma_preset: int = 9, lzma_extreme: bool = True,
           encrypt: bool = True, obfuscate: bool = False,
           zombie: bool = False, antidump: bool = True,
-          guard: str = "off", add_data: list[str] | None = None) -> Path:
+          guard: str = "off", add_data: list[str] | None = None,
+          hide_console: bool = False) -> Path:
     """Full pipeline: Cython --embed -> .vcxproj/.sln -> MSBuild -> EXE+PDB.
 
     With onefile=True the program and its runtime are staged under build/ and
@@ -518,6 +521,15 @@ def build(entry: str | Path, name: str | None = None, dist: str | Path = "dist",
         print(f"[cpythonizer] Frozen preamble: __file__ -> {where} "
               f"(entry {entry_to_transpile.name})")
     c_file = cythonize_embed(py, entry_to_transpile, work, embed=embed, release=release)
+    if embed:
+        # The program has to apply the same console policy as the loader around
+        # it, or one of the two would flash a window the other just hid.
+        policy = inject_console_policy(c_file, noconsole=noconsole,
+                                       hide_console=hide_console)
+        if policy:
+            print(f"[cpythonizer] Console policy on the program: {policy}"
+                  + (" (hidden console allocated for child processes)"
+                     if policy == "alloc" else " (console window hidden)"))
     for mod in local_modules:
         cythonize_local_module(py, mod, work, release=release)
 
@@ -616,6 +628,7 @@ def build(entry: str | Path, name: str | None = None, dist: str | Path = "dist",
                 keep_pdb=keep_pdb, compress=compress,
                 lzma_preset=lzma_preset, lzma_extreme=lzma_extreme,
                 encrypt=encrypt, antidump=antidump, guard=guard,
+                hide_console=hide_console,
             )
         from .onefile import assemble
         return assemble(stage_dir, app_name, work, msbuild, install.release,
@@ -623,7 +636,7 @@ def build(entry: str | Path, name: str | None = None, dist: str | Path = "dist",
                         release_mode=release, noconsole=noconsole,
                         keep_pdb=keep_pdb, compress=compress,
                         lzma_preset=lzma_preset, lzma_extreme=lzma_extreme,
-                        encrypt=encrypt)
+                        encrypt=encrypt, hide_console=hide_console)
 
     if emit_debug and pdb.is_file():
         print(f"[cpythonizer] DONE:\n  EXE: {exe}\n  PDB: {pdb}")
