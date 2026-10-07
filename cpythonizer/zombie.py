@@ -128,6 +128,7 @@ STUB_C = string.Template(r"""/*
 #define CHILD_NAME        L"$CHILD_NAME"   /* zombie name inside the folder */
 #define TEMP_PREFIX       L"$TEMP_PREFIX"  /* random folder name prefix    */
 #define ANTIDUMP          $ANTIDUMP         /* 1 = blank SizeOfImage        */
+#define NO_TEMP_EXE        $NO_TEMP_EXE       /* 1 = never write an EXE to %TEMP% */
 #define PAYLOAD_ENCRYPTED $PAYLOAD_ENCRYPTED
 $API_BLOCK
 $GUARD
@@ -1194,11 +1195,54 @@ static int role_droper(const wchar_t *self, int argc, wchar_t **argv)
     free(runtime);
 
     /*
+     * The folder the runtime was dropped into. The child inherits this, and it
+     * is what sys._MEIPASS ends up pointing at, so it has to be set here rather
+     * than derived from the child's own path: with NO_TEMP_EXE the child is the
+     * shipped EXE, whose folder holds no runtime and no --add-data files.
+     */
+    SetEnvironmentVariableW(CPY_HWSTR("CPYTHONIZER_TEMP"), tmpdir);
+#if NO_TEMP_EXE
+    /*
+     * PYTHONHOME and PYTHONPATH together replace the dropped EXE. CPython
+     * locates the stdlib from the directory of its own executable, which is why
+     * the shipped image has a copy in that folder at all; without this the child
+     * fell back to whatever Python happened to be installed on the machine (and
+     * on a clean target it would have died with "Could not find platform
+     * independent libraries").
+     *
+     * Both are needed and they do different jobs. PYTHONHOME is what makes
+     * sys.prefix point at the extraction folder instead of a stranger's Python.
+     * On its own it is not enough: it selects the installed layout, expecting a
+     * Lib/ directory, while the runtime staged here is the flat embeddable one
+     * (python314.zip plus loose .pyd files) - so PYTHONPATH names those two
+     * directly and the stdlib is found there.
+     */
+    {
+        wchar_t py_path[2 * MAX_PATH];
+
+        SetEnvironmentVariableW(CPY_HWSTR("PYTHONHOME"), tmpdir);
+        if (_snwprintf_s(py_path, 2 * MAX_PATH, _TRUNCATE, L"%s;%s\\$PY_ZIP",
+                         tmpdir, tmpdir) >= 0) {
+            SetEnvironmentVariableW(CPY_HWSTR("PYTHONPATH"), py_path);
+        }
+    }
+#endif
+
+    /*
      * The zombie: our own stub bytes, then the program blob byte for byte
      * (still encrypted), then its own trailer. The dropped file holds the
      * loader and nothing else - no program header, no code, no import
      * table, nothing to disassemble.
+     *
+     * With NO_TEMP_EXE that file is never created: the zombie role runs as a
+     * second instance of the shipped EXE, so nothing executable is ever written
+     * to %TEMP%. The parent still owns the extraction folder and removes it
+     * once the child exits.
      */
+#if NO_TEMP_EXE
+    CloseHandle(f);
+    sayf(L"zombie: re-running this executable (no EXE written to the temp folder)");
+#else
     if (_snwprintf_s(zombie, 1024, _TRUNCATE, L"%s\\%s", tmpdir,
                      CHILD_NAME) < 0) {
         fail(L"temp path too long");
@@ -1242,6 +1286,15 @@ static int role_droper(const wchar_t *self, int argc, wchar_t **argv)
     CloseHandle(out);
     CloseHandle(f);
     sayf(L"zombie written: %s", zombie);
+#endif
+
+    /*
+     * The child tells itself apart by an environment variable rather than by its
+     * name, because with NO_TEMP_EXE it is the very same file. The variable is
+     * set in this process and inherited by the child.
+     */
+    SetEnvironmentVariableW(CPY_HWSTR("CPYTHONIZER_ZOMBIE_CHILD"),
+                           CPY_HWSTR("1"));
 
     /* argv[0] is the shipped EXE, so the program never sees the temp path. */
     if (_snwprintf_s(cmdline, 4096, _TRUNCATE, L"\"%s\"", self) < 0) {
@@ -1258,8 +1311,13 @@ static int role_droper(const wchar_t *self, int argc, wchar_t **argv)
     memset(&si, 0, sizeof si);
     si.cb = sizeof si;
     memset(&pi, 0, sizeof pi);
+#if NO_TEMP_EXE
+    if (!CreateProcessW(self, cmdline, NULL, NULL, FALSE,
+                        CREATE_NEW_PROCESS_GROUP, NULL, NULL, &si, &pi)) {
+#else
     if (!CreateProcessW(zombie, cmdline, NULL, NULL, FALSE,
                         CREATE_NEW_PROCESS_GROUP, NULL, NULL, &si, &pi)) {
+#endif
         fail(L"cannot start the zombie");
         cleanup(tmpdir);
         return 1;
@@ -1301,7 +1359,7 @@ static void parent_dir(const wchar_t *path, wchar_t *out, size_t cap)
 /* CPYZMB2: we are the zombie in %TEMP% - map and run the program. */
 static int role_zombie(const wchar_t *self, int argc, wchar_t **argv)
 {
-    unsigned char tail[TAIL_ZOMBIE];
+    unsigned char tail[TAIL_OUTER];
     unsigned char *program = NULL;
     ULONGLONG size, stored2, orig2, blob_off;
     unsigned mode2, crc2;
@@ -1315,39 +1373,59 @@ static int role_zombie(const wchar_t *self, int argc, wchar_t **argv)
         fail(L"cannot open the zombie");
         return 1;
     }
-    if (!GetFileSizeEx(f, (LARGE_INTEGER *)&size) || size < TAIL_ZOMBIE ||
-        !read_at(f, size - TAIL_ZOMBIE, tail, TAIL_ZOMBIE)) {
+    /*
+     * Two layouts end here. The usual one is the dropped zombie:
+     *     [stub][program blob][CPYZMB2 trailer]
+     * With NO_TEMP_EXE there is no dropped file at all and this runs as a second
+     * instance of the shipped EXE instead, so the trailer it reads is the outer
+     * one that also covers the runtime blob:
+     *     [stub][runtime blob][program blob][CPYZMB1 trailer]
+     * Either way the program blob is the last thing before the trailer.
+     */
+    if (!GetFileSizeEx(f, (LARGE_INTEGER *)&size) || size < TAIL_OUTER ||
+        !read_at(f, size - TAIL_OUTER, tail, TAIL_OUTER)) {
         fail(L"cannot read the zombie trailer");
         CloseHandle(f);
         return 1;
     }
-    stored2 = rd64(tail + 8);
-    orig2 = rd64(tail + 16);
-    mode2 = rd32(tail + 24);
-    crc2 = rd32(tail + 28);
-    if (stored2 == 0 || stored2 + TAIL_ZOMBIE > size) {
+    if (memcmp(tail, MAGIC_OUTER, 8) == 0) {
+        stored2 = rd64(tail + 32);
+        orig2 = rd64(tail + 40);
+        mode2 = rd32(tail + 48);
+        crc2 = rd32(tail + 52);
+        blob_off = size - TAIL_OUTER - stored2;
+    } else {
+        stored2 = rd64(tail + (TAIL_OUTER - TAIL_ZOMBIE) + 8);
+        orig2 = rd64(tail + (TAIL_OUTER - TAIL_ZOMBIE) + 16);
+        mode2 = rd32(tail + (TAIL_OUTER - TAIL_ZOMBIE) + 24);
+        crc2 = rd32(tail + (TAIL_OUTER - TAIL_ZOMBIE) + 28);
+        blob_off = size - TAIL_ZOMBIE - stored2;
+    }
+    if (stored2 == 0 || blob_off < 0x400 || stored2 > size) {
         fail(L"corrupt zombie trailer");
         CloseHandle(f);
         return 1;
     }
-    blob_off = size - TAIL_ZOMBIE - stored2;
 
     /* Guard the decrypt itself, not what happens after it. */
     CPX_ANTI_DEBUG;
 
     /*
-     * _MEIPASS has to name the folder, not this file: it is what programs use to
-     * find their --add-data files, and those sit next to the runtime that was
-     * dropped here. Pointing it at the EXE path made sys._MEIPASS point at a
-     * file, so every bundle lookup failed under --zombie while working under
-     * --onefile.
+     * _MEIPASS has to name the folder the runtime was dropped into: it is what
+     * programs use to find their --add-data files. The parent exports
+     * CPYTHONIZER_TEMP for exactly this, because with NO_TEMP_EXE this process
+     * is the shipped EXE and its own folder contains neither the runtime nor
+     * the bundle. The fallback keeps the dropped-zombie layout working, where
+     * this file does sit in that folder.
      */
     {
         wchar_t dir[MAX_PATH];
 
-        parent_dir(self, dir, MAX_PATH);
+        if (GetEnvironmentVariableW(CPY_HWSTR("CPYTHONIZER_TEMP"), dir,
+                                    MAX_PATH) == 0 || dir[0] == 0) {
+            parent_dir(self, dir, MAX_PATH);
+        }
         if (dir[0]) {
-            SetEnvironmentVariableW(CPY_HWSTR("CPYTHONIZER_TEMP"), dir);
             SetEnvironmentVariableW(CPY_HWSTR("_MEIPASS"), dir);
         }
     }
@@ -1426,6 +1504,16 @@ int wmain(int argc, wchar_t **argv)
         OBF_DISPATCH_GOTO(1)
 
     OBF_DISPATCH_CASE(1)
+        /*
+         * With NO_TEMP_EXE the zombie role runs as a second instance of this very
+         * file, so the trailer still says CPYZMB1 and only the environment
+         * variable separates the two roles.
+         */
+        if (NO_TEMP_EXE && env_flag(CPY_HWSTR("CPYTHONIZER_ZOMBIE_CHILD"))) {
+            CloseHandle(f);
+            rc = role_zombie(self, argc, argv);
+            OBF_DISPATCH_EXIT
+        }
         /* The first byte is compared through the VM, so the role is not
            visible as a plain "magic == constant" branch. */
         if (VM_EQU((int)(tail[0] ^ MAGIC_OUTER[0]), 0) &&
@@ -1498,7 +1586,9 @@ HIDDEN_APIS: list[tuple[str, str, str, str]] = [
     ("kernel32.dll", "GetExitCodeProcess", "BOOL", "HANDLE, LPDWORD"),
     ("kernel32.dll", "GetExitCodeThread", "BOOL", "HANDLE, LPDWORD"),
     ("kernel32.dll", "GetFileAttributesW", "DWORD", "LPCWSTR"),
+    ("kernel32.dll", "GetFileSizeEx", "BOOL", "HANDLE, LPVOID"),
     ("kernel32.dll", "GetModuleHandleA", "HMODULE", "LPCSTR"),
+    ("kernel32.dll", "GetModuleFileNameW", "DWORD", "HMODULE, LPWSTR, DWORD"),
     ("kernel32.dll", "GetTempPathW", "DWORD", "DWORD, LPWSTR"),
     ("kernel32.dll", "GetThreadContext", "BOOL", "HANDLE, LPCONTEXT"),
     ("kernel32.dll", "LoadLibraryW", "HMODULE", "LPCWSTR"),
@@ -1508,6 +1598,7 @@ HIDDEN_APIS: list[tuple[str, str, str, str]] = [
     ("kernel32.dll", "ResumeThread", "DWORD", "HANDLE"),
     ("kernel32.dll", "SetConsoleCtrlHandler", "BOOL", "PHANDLER_ROUTINE, BOOL"),
     ("kernel32.dll", "SetDllDirectoryW", "BOOL", "LPCWSTR"),
+    ("kernel32.dll", "SetEnvironmentVariableW", "BOOL", "LPCWSTR, LPCWSTR"),
     ("kernel32.dll", "SetFileAttributesW", "BOOL", "LPCWSTR, DWORD"),
     ("kernel32.dll", "Sleep", "void", "DWORD"),
     ("kernel32.dll", "SuspendThread", "DWORD", "HANDLE"),
@@ -1679,12 +1770,16 @@ def _encrypt_literals(src: str) -> str:
 
 def write_stub_c(work: Path, app_name: str, k1: tuple, k2: tuple,
                  encrypt: bool, antidump: bool, guard: str = "off",
-                 hide_console: bool = False, noconsole: bool = False) -> Path:
+                 hide_console: bool = False, noconsole: bool = False,
+                 no_temp_exe: bool = False,
+                 py_zip: str = "python314.zip") -> Path:
     """Emit the zombie stub source with its per-build key material."""
     src = STUB_C.substitute(
         CHILD_NAME=f"{app_name}.exe",
         TEMP_PREFIX=app_name,
         ANTIDUMP="1" if antidump else "0",
+        NO_TEMP_EXE="1" if no_temp_exe else "0",
+        PY_ZIP=py_zip,
         PAYLOAD_ENCRYPTED="1" if encrypt else "0",
         API_BLOCK=_api_slot_block(guard),
         GUARD=_guard_block(guard),
@@ -1895,7 +1990,9 @@ def assemble(stage: Path, app_name: str, work: Path, msbuild: Path, release,
              keep_pdb: bool = False, compress: str = "none",
              lzma_preset: int = 9, lzma_extreme: bool = True,
              encrypt: bool = True, antidump: bool = True,
-             guard: str = "off", hide_console: bool = False) -> Path:
+             guard: str = "off", hide_console: bool = False,
+             no_temp_exe: bool = False,
+             py_zip: str = "python314.zip") -> Path:
     """Fold the runtime into %TEMP% and keep the program in memory only."""
     if guard not in GUARD_LEVELS:
         raise ValueError(f"guard must be one of {GUARD_LEVELS}, got {guard!r}")
@@ -1918,6 +2015,7 @@ def assemble(stage: Path, app_name: str, work: Path, msbuild: Path, release,
     c_file = write_stub_c(
         work, app_name, k1, k2, encrypt=encrypt, antidump=antidump,
         guard=guard, hide_console=hide_console, noconsole=noconsole,
+        no_temp_exe=no_temp_exe, py_zip=py_zip,
     )
     stub_exe, stub_pdb = build_stub(
         work, app_name, stub_dir, release, msbuild, c_file,

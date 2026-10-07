@@ -262,24 +262,28 @@ the *data sections* — MSVC still emits the bytes as `.text` immediates, so a r
 file finds them anyway. The port therefore encrypts at build time: `CPY_HSTR("x")` is rewritten
 into a per-site XOR array decoded at the call site, so the plaintext never reaches the binary.
 
-**Hidden imports.** `basic`/`full` resolve all 36 Win32 entry points the loader uses at run time
+**Hidden imports.** `basic`/`full` resolve all 39 Win32 entry points the loader uses at run time
 instead of importing them: `PEB->ImageBaseAddress` gives the loader's own base, its own import
 directory yields `GetModuleHandleW`/`LoadLibraryExW` (forced references — the linker drops an
 import nobody uses), and every other function is found by walking kernel32's and bcrypt.dll's
 export directories and matching a keyed hash of `"<module>!<function>"`. No function name exists
-anywhere in the file, and the expected-hash table is itself stored encrypted. Import table of
-the packed stub, measured:
+anywhere in the file, and the expected-hash table is itself stored encrypted. Import table of the
+packed stub, counted by parsing the import directory (not by grepping strings):
 
 ```text
-guard off            103   (96 KERNEL32 + 7 bcrypt)
-guard basic / full    76   (a plain /MT hello-world imports 76)
+bare /MT hello-world   1 DLL,  75 functions   <- the static CRT, nothing else
+guard basic / full     1 DLL,  76 functions   <- 75 + GetFileSizeEx, no bcrypt at all
+guard off              2 DLLs, 103 functions   <- 96 KERNEL32 + 7 bcrypt
 ```
 
-So `basic`/`full` leave the loader with **zero** Win32 imports of its own: no `CreateProcessW`,
-no `VirtualAlloc`, no `BCryptDecrypt`, no `LoadLibraryW`, no `GetThreadContext`,
-no `AddVectoredExceptionHandler`. What remains is the static CRT's own list (heap, TLS, stdio),
-which no work on the loader can remove — only dropping the CRT entirely could, and the stub
-needs `malloc`/`memcpy`/`fwprintf`. The two bootstrap names plus the CRT's 74 are the floor.
+So `basic`/`full` leave the loader with **no Win32 imports of its own**: the set difference against
+a bare `/MT` binary is one name, `GetFileSizeEx`, and it is not something the code calls directly -
+all three call sites go through the hash table (checked in the preprocessed output). Where it comes
+from is not explained, and it is harmless: a file-size API that appears in most CRT programs anyway.
+None of the interesting ones are there: no `CreateProcessW`, no `VirtualAlloc`, no `BCryptDecrypt`,
+no `LoadLibraryW`, no `GetThreadContext`, no `AddVectoredExceptionHandler`, no `VirtualProtect`.
+What remains is the static CRT's own list (heap, TLS, stdio), which no work on the loader can remove -
+only dropping the CRT entirely could, and the stub needs `malloc`/`memcpy`/`fwprintf`.
 
 Fingerprints found in the first 200 KB of the packed EXE:
 
@@ -298,6 +302,25 @@ cosmetic — `AddVectoredExceptionHandler` is one of the forwarded ones, so befo
 loader stored a *string address* in that slot and jumped into kernel32's string table when the
 verbose crash locator was installed. The bug was invisible to a matrix that only checked exit codes,
 because the call is reached only when `CPYTHONIZER_ONEFILE_VERBOSE=1`; see `tests/` below.
+
+**Never writing an EXE to `%TEMP%` (`--no-temp-exe`).** By default the loader drops a copy of its
+own stub into the extraction folder, and that copy is what runs the program: the stub is a real file,
+so CPython finds `python314.zip` next to its own executable, and when the program exits the parent
+can delete the whole folder. `--no-temp-exe` removes that file entirely - the zombie role runs as a
+second instance of the shipped EXE instead, told apart by an environment variable rather than by
+its name, and the parent relocates the interpreter by hand (`PYTHONHOME` for `sys.prefix`,
+`PYTHONPATH` for the flat embeddable layout, which has no `Lib/` directory). Measured, both modes:
+
+```text
+default      temp folder contains: python314.zip, python314.dll, *.pyd, *.dll, <app>.exe
+--no-temp-exe temp folder contains: python314.zip, python314.dll, *.pyd, *.dll
+             sys._MEIPASS / sys.prefix / __file__ : identical in both
+             temp folder removed on exit          : yes, both
+```
+
+Without the relocation the child silently fell back to whatever Python was installed on the
+machine, and on a clean target it would have died with "Could not find platform independent
+libraries" - the test asserts the temp folder holds no `*.exe` *and* that the program still runs.
 
 **Anti-debug** probes `PEB.BeingDebugged`, `ProcessDebugPort` / `ProcessDebugObjectHandle`,
 `CheckRemoteDebuggerPresent` and the DR7 hardware-breakpoint bits, hides the thread with
@@ -328,6 +351,9 @@ with the resolver. It skips cleanly when no MSVC toolchain is present.
 - the program's output is byte-identical to the unprotected build
 - `CPYTHONIZER_ONEFILE_VERBOSE=1` really prints loader diagnostics **and still exits 0**
 - `CPYTHONIZER_ONEFILE_KEEP=1` leaves the dropped runtime behind; a normal run removes it
+- `--no-temp-exe` leaves no `*.exe` in that folder while the default mode does, and the program
+  still lands on the same `sys._MEIPASS` / `__file__` (with nothing dropped next to the child, the
+  interpreter has to be relocated by hand)
 - the default build reports blanking `SizeOfImage`, `--no-antidump` does not, and the dropped stub
   on disk keeps a valid one (Windows has to be able to load it)
 - `guard off` imports `bcrypt.dll`, `guard full` does not

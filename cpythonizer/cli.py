@@ -74,6 +74,7 @@ def cmd_vs_build(args: argparse.Namespace) -> int:
         guard=getattr(args, "guard", "off"),
         add_data=getattr(args, "add_data", None),
         hide_console=getattr(args, "hide_console", False),
+        no_temp_exe=getattr(args, "no_temp_exe", False),
     )
     print(out)
     return 0
@@ -199,6 +200,9 @@ def build_parser() -> argparse.ArgumentParser:
                    help="Stop child processes from flashing a console window: hide the console "
                         "rather than removing it, so children inherit the hidden one. Combine "
                         "with --noconsole to keep the GUI subsystem too (recommended for GUI apps)")
+    v.add_argument("--no-temp-exe", action="store_true", default=False,
+                   help="Zombie mode: never write an EXE to %%TEMP%% - the zombie role runs as a "
+                        "second instance of the shipped EXE instead of a dropped copy")
     v.set_defaults(func=cmd_vs_build)
 
     o = sub.add_parser("obfuscate", help="Obfuscate Python source files")

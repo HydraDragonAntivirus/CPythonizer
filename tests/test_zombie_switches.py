@@ -228,6 +228,9 @@ def check() -> list[str]:
                                  "--release", "--no-antidump", *add_data], data)
     off = _build("ZGuardOff", src, ["--zombie", "--guard", "off", "--lzma2",
                                     "--release", *add_data], data)
+    notemp = _build("ZNoTempExe", src, ["--zombie", "--guard", "full", "--lzma2",
+                                        "--release", "--no-temp-exe", *add_data],
+                    data)
 
     # 1. the program itself must behave identically, protected or not
     base = _runs(plain, 2)[0][1]
@@ -235,7 +238,7 @@ def check() -> list[str]:
         bad.append(f"plain build did not run the program: {base[:200]!r}")
     want_size = data.stat().st_size
     for name, exe in (("zombie guard full", guarded), ("zombie no-antidump", noad),
-                      ("zombie guard off", off)):
+                      ("zombie guard off", off), ("zombie no-temp-exe", notemp)):
         runs = _runs(exe, 3)
         for i, (code, out) in enumerate(runs):
             if code != 0:
@@ -252,7 +255,8 @@ def check() -> list[str]:
     for name, out in (("plain", base),
                       ("zombie guard full", _execute(guarded).stdout),
                       ("zombie no-antidump", _execute(noad).stdout),
-                      ("zombie guard off", _execute(off).stdout)):
+                      ("zombie guard off", _execute(off).stdout),
+                      ("zombie no-temp-exe", _execute(notemp).stdout)):
         meipass_size, file_size = _data_sizes(out)
         if meipass_size != want_size:
             bad.append(f"{name}: --add-data file read back as {meipass_size} bytes "
@@ -318,6 +322,31 @@ def check() -> list[str]:
         bad.append(f"guard off still hides bcrypt.dll (imports: {sorted(off_dlls)})")
     if "bcrypt.dll" in guard_dlls:
         bad.append("guard full left bcrypt.dll in the import table")
+
+    # 6. --no-temp-exe must leave no executable behind, and the default must.
+    #     The dropped zombie is what tells CPython where the runtime is, so this
+    #     mode also has to relocate the interpreter by hand (PYTHONHOME and
+    #     PYTHONPATH) - which is invisible in the output unless the folder is
+    #     left in place for a look.
+    for label, exe, want_exe in (("default", guarded, True),
+                                 ("no-temp-exe", notemp, False)):
+        res = _execute(exe, {"CPYTHONIZER_ONEFILE_VERBOSE": "1",
+                             "CPYTHONIZER_ONEFILE_KEEP": "1"})
+        folder = _temp_folder_of(_log(res))
+        if folder is None or not folder.is_dir():
+            bad.append(f"{label}: KEEP=1 did not leave a temp folder to inspect")
+            continue
+        try:
+            if MARKER not in res.stdout:
+                bad.append(f"{label}: KEEP=1 run did not reach the program")
+            found = sorted(p.name for p in folder.glob("*.exe"))
+            if want_exe and not found:
+                bad.append("default build wrote no EXE to the temp folder")
+            if not want_exe and found:
+                bad.append(f"--no-temp-exe left {found} in the temp folder")
+        finally:
+            import shutil
+            shutil.rmtree(folder, ignore_errors=True)
     return bad
 
 
