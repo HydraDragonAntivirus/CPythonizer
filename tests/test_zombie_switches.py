@@ -35,15 +35,24 @@ for i in range(4096):
     TABLE[i] = (i * 2654435761) % 0xFFFFFFFF
 digest = hashlib.sha256(PAYLOAD).hexdigest()
 checksum = sum(TABLE[i] * (i + 1) for i in range(0, 4096, 7)) % 0xFFFFFFFF
-# --add-data: read it the PyInstaller way, so this also proves sys._MEIPASS
-# points at the folder the loader extracted the runtime into.
-BASE = getattr(sys, "_MEIPASS", os.path.dirname(sys.executable))
-try:
-    with open(os.path.join(BASE, "probe.dat"), "rb") as fh:
-        data_size = len(fh.read())
-except OSError:
-    data_size = -1
-print("ZPROBE", digest, checksum, len(sys.modules) > 0, os.name, data_size)
+
+
+def _read(path):
+    try:
+        with open(path, "rb") as fh:
+            return len(fh.read())
+    except OSError:
+        return -1
+
+
+# --add-data through the PyInstaller-style lookup ...
+BASE = getattr(sys, "_MEIPASS", None) or os.path.dirname(sys.executable)
+data_size = _read(os.path.join(BASE, "probe.dat"))
+# ... and through the plain "next to me" one, which is what untouched code does.
+# In a frozen build __file__ is the string "built-in" unless the build puts a
+# real path there, and then this comes back as -1.
+file_size = _read(os.path.join(os.path.dirname(__file__), "probe.dat"))
+print("ZPROBE", digest, checksum, len(sys.modules) > 0, os.name, data_size, file_size)
 '''
 
 MARKER = "ZPROBE"
@@ -108,18 +117,50 @@ def _run(args, env=None):
                           cwd=ROOT, capture_output=True, text=True, env=env)
 
 
-def _build(name: str, source: Path, extra: list[str]) -> Path:
+def _write_if_changed(path: Path, text: str) -> None:
+    """Only touch the file when its content actually changed.
+
+    The rebuild check below compares timestamps, so rewriting an identical probe
+    on every run would invalidate all four builds and turn a two-second check
+    into a five-minute one.
+    """
+    if not path.is_file() or path.read_text(encoding="utf-8") != text:
+        path.write_text(text, encoding="utf-8")
+
+
+def _newest_source_mtime() -> float:
+    """Newest file that can change what a build produces."""
+    roots = [ROOT / "cpythonizer", ROOT / "pyproject.toml"]
+    newest = 0.0
+    for item in roots:
+        candidates = [item] if item.is_file() else list(item.rglob("*"))
+        for path in candidates:
+            if path.is_file() and path.suffix in (".py", ".h"):
+                newest = max(newest, path.stat().st_mtime)
+    return newest
+
+
+def _build(name: str, source: Path, extra: list[str], stamp: Path) -> Path:
     dist = WORK / "dist"
+    exe = dist / name / f"{name}.exe"
+    # Reuse only while nothing that feeds the build has changed, so iterating on
+    # the checks costs seconds instead of five minutes - and so a stale binary is
+    # never mistaken for a passing test.
+    cutoff = max(stamp.stat().st_mtime, _newest_source_mtime())
+    if exe.is_file() and exe.stat().st_mtime > cutoff:
+        print(f"    reusing {name} ({exe.stat().st_size // 1024} KB, unchanged sources)")
+        return exe
+    print(f"    building {name} ...", flush=True)
     started = time.time()
     res = _run(["vs-build", str(source), "--name", name, "--dist", str(dist),
                 *extra])
     if res.returncode != 0:
         raise AssertionError(f"build {name} failed:\n{res.stdout[-4000:]}\n"
                              f"{res.stderr[-4000:]}")
-    exe = dist / name / f"{name}.exe"
     if not exe.is_file():
         raise AssertionError(f"build {name} produced no {exe}")
-    print(f"    built {name} in {time.time() - started:.0f}s")
+    print(f"    built {name} in {time.time() - started:.0f}s "
+          f"({exe.stat().st_size // 1024} KB)", flush=True)
     return exe
 
 
@@ -135,17 +176,17 @@ def _log(res) -> str:
     return res.stdout + res.stderr
 
 
-def _data_size(output: str) -> int:
-    """The last field of the ZPROBE line is the size of the --add-data file."""
+def _data_sizes(output: str) -> tuple[int, int]:
+    """Sizes of the --add-data file as seen via _MEIPASS and via __file__."""
     for line in output.splitlines():
         if line.startswith(MARKER):
             parts = line.split()
-            if len(parts) >= 6:
+            if len(parts) >= 7:
                 try:
-                    return int(parts[-1])
+                    return int(parts[-2]), int(parts[-1])
                 except ValueError:
-                    return -2
-    return -1
+                    return -2, -2
+    return -1, -1
 
 
 def _temp_folder_of(output: str) -> Path | None:
@@ -169,19 +210,24 @@ def check() -> list[str]:
         return ["skip: set CPXP_ZOMBIE_TESTS=1 to run the builds"]
     WORK.mkdir(parents=True, exist_ok=True)
     src = WORK / "probe.py"
-    src.write_text(PROGRAM, encoding="utf-8")
+    _write_if_changed(src, PROGRAM)
     data = WORK / "probe.dat"
-    data.write_bytes(b"add-data-payload" * (DATA_BYTES // 16 + 1))
+    # Written next to the entry as well as staged with --add-data: the plain
+    # build resolves __file__ to the app folder, the frozen ones to the bundle,
+    # and both must end up able to read it.
+    blob = b"add-data-payload" * (DATA_BYTES // 16 + 1)
+    if not data.is_file() or data.read_bytes() != blob:
+        data.write_bytes(blob)
     add_data = ["--add-data", f"{data};."]
     bad: list[str] = []
 
-    plain = _build("ZPlain", src, ["--release", *add_data])
+    plain = _build("ZPlain", src, ["--release", *add_data], data)
     guarded = _build("ZGuard", src, ["--zombie", "--guard", "full", "--lzma2",
-                                     "--release", *add_data])
+                                     "--release", *add_data], data)
     noad = _build("ZNoAd", src, ["--zombie", "--guard", "full", "--lzma2",
-                                 "--release", "--no-antidump", *add_data])
+                                 "--release", "--no-antidump", *add_data], data)
     off = _build("ZGuardOff", src, ["--zombie", "--guard", "off", "--lzma2",
-                                    "--release", *add_data])
+                                    "--release", *add_data], data)
 
     # 1. the program itself must behave identically, protected or not
     base = _runs(plain, 2)[0][1]
@@ -199,17 +245,23 @@ def check() -> list[str]:
                            f"  plain : {base.strip()[:200]}\n"
                            f"  zombie: {out.strip()[:200]}")
 
-    # 1b. --add-data must actually be reachable at run time, in every mode.
-    #     Comparing against the plain build above is not enough on its own: if
-    #     the file were missing everywhere, all four outputs would still match.
+    # 1b. --add-data must actually be reachable at run time, in every mode, and
+    #     through both lookups real code uses. Comparing against the plain build
+    #     above is not enough on its own: if the file were missing everywhere,
+    #     all four outputs would still match.
     for name, out in (("plain", base),
                       ("zombie guard full", _execute(guarded).stdout),
                       ("zombie no-antidump", _execute(noad).stdout),
                       ("zombie guard off", _execute(off).stdout)):
-        got = _data_size(out)
-        if got != want_size:
-            bad.append(f"{name}: --add-data file read back as {got} bytes, "
-                       f"expected {want_size} (sys._MEIPASS lookup)")
+        meipass_size, file_size = _data_sizes(out)
+        if meipass_size != want_size:
+            bad.append(f"{name}: --add-data file read back as {meipass_size} bytes "
+                       f"through sys._MEIPASS, expected {want_size}")
+        if file_size != want_size:
+            bad.append(f"{name}: --add-data file read back as {file_size} bytes "
+                       f"through __file__, expected {want_size} (an embedded "
+                       f"module reports __file__ as 'built-in' unless the build "
+                       f"gives it a real path)")
 
     # 2. VERBOSE=1 must actually print diagnostics and still succeed. This is the
     #    check that used to be missing: the loader crashed only on this path.
