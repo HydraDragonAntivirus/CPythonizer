@@ -158,6 +158,50 @@ them with LZMA2 preset 9. The debug switches of `--onefile` work unchanged
 what it maps, which imports it resolved, and — if the mapped program ever faults — the faulting
 address and the module it belongs to.
 
+### Bundling data files (`--add-data`)
+
+```powershell
+python -m cpythonizer vs-build shadowfox.py --name shadowfox_onefile --dist dist `
+    --onefile --icon shadowfox.ico --release --noconsole `
+    --add-data "shadowfox_logo.png;." --add-data "shadowfox.ico;." --add-data "assets;images"
+```
+
+The flag is repeatable and takes PyInstaller's `SOURCE;DEST` syntax (a `SOURCE:DEST`
+form is accepted too, and a Windows drive letter does not confuse the parser).
+`DEST` is always a **folder**: a file keeps its own name inside it, a directory becomes a
+subfolder of it. `..` and absolute destinations are rejected, and a missing source is
+reported *before* the build starts rather than after a two-minute MSBuild run.
+
+Where the files end up, and how your program finds them:
+
+| mode | location | lookup |
+|---|---|---|
+| plain | next to the EXE in `dist/<app>/` | `os.path.dirname(sys.executable)` |
+| `--onefile` / `--zombie` | inside the payload, extracted to the `%TEMP%` folder | `sys._MEIPASS` |
+
+```python
+import os, sys
+BASE = getattr(sys, "_MEIPASS", os.path.dirname(sys.executable))
+logo = os.path.join(BASE, "shadowfox_logo.png")
+```
+
+For the frozen modes `sys._MEIPASS` is set for you: the loaders export
+`_MEIPASS`/`CPYTHONIZER_TEMP` pointing at the extraction folder, and the staged
+`python314.zip` carries a `sitecustomize.py` that copies it onto `sys` during start-up.
+Without it, `sys._MEIPASS` — the one attribute PyInstaller-frozen code usually asks for
+directly — would be missing, and bundled files would be unreachable. Under `--zombie` this
+needed a fix of its own: the loader set the variables to the path of the zombie **file**
+rather than to its folder, so every bundle lookup failed there while working under
+`--onefile`.
+
+**Security note.** With `--zombie` the program itself is still never written to disk, but
+anything passed to `--add-data` is, in the clear, in `%TEMP%` for as long as the app runs.
+Do not ship secrets that way.
+
+An `--icon` that the resource compiler rejects (for example `RC2176: old DIB`) no longer
+kills the build: the project is regenerated without the icon, the build continues, and a
+warning is printed. A missing icon beats no binary.
+
 ### Guard layers (`--guard basic|full`)
 
 The loader is C, so it is the softest target in the package. `--guard` compiles the stub with

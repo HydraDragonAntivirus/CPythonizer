@@ -1277,6 +1277,26 @@ static int role_droper(const wchar_t *self, int argc, wchar_t **argv)
     return (int)code;
 }
 
+/* Directory part of a path, without touching the trailing separator. */
+static void parent_dir(const wchar_t *path, wchar_t *out, size_t cap)
+{
+    size_t n = 0;
+
+    while (path[n] && n + 1 < cap) {
+        out[n] = path[n];
+        n++;
+    }
+    out[n] = 0;
+    while (n) {
+        n--;
+        if (out[n] == L'\\' || out[n] == L'/') {
+            out[n] = 0;
+            return;
+        }
+    }
+    out[0] = 0;
+}
+
 /* CPYZMB2: we are the zombie in %TEMP% - map and run the program. */
 static int role_zombie(const wchar_t *self, int argc, wchar_t **argv)
 {
@@ -1314,8 +1334,22 @@ static int role_zombie(const wchar_t *self, int argc, wchar_t **argv)
     /* Guard the decrypt itself, not what happens after it. */
     CPX_ANTI_DEBUG;
 
-    SetEnvironmentVariableW(CPY_HWSTR("CPYTHONIZER_TEMP"), self);
-    SetEnvironmentVariableW(CPY_HWSTR("_MEIPASS"), self);
+    /*
+     * _MEIPASS has to name the folder, not this file: it is what programs use to
+     * find their --add-data files, and those sit next to the runtime that was
+     * dropped here. Pointing it at the EXE path made sys._MEIPASS point at a
+     * file, so every bundle lookup failed under --zombie while working under
+     * --onefile.
+     */
+    {
+        wchar_t dir[MAX_PATH];
+
+        parent_dir(self, dir, MAX_PATH);
+        if (dir[0]) {
+            SetEnvironmentVariableW(CPY_HWSTR("CPYTHONIZER_TEMP"), dir);
+            SetEnvironmentVariableW(CPY_HWSTR("_MEIPASS"), dir);
+        }
+    }
 
     program = load_blob(f, blob_off, stored2, orig2, mode2, crc2,
                         K2_MASK, K2_MASKED, K2_IV, &program_len);
@@ -1325,7 +1359,7 @@ static int role_zombie(const wchar_t *self, int argc, wchar_t **argv)
         return 1;
     }
     sayf(L"program blob ready: %lu bytes", (unsigned long)program_len);
-    if (verbose() && !env_flag(CPY_HWSTR("CPYTHONIZER_ONEFILE_NOVEH")))
+    if (verbose())
         AddVectoredExceptionHandler(1,
                                     (PVECTORED_EXCEPTION_HANDLER)on_exception);
 

@@ -72,6 +72,7 @@ def cmd_vs_build(args: argparse.Namespace) -> int:
         zombie=zombie,
         antidump=getattr(args, "antidump", True),
         guard=getattr(args, "guard", "off"),
+        add_data=getattr(args, "add_data", None),
     )
     print(out)
     return 0
@@ -183,6 +184,10 @@ def build_parser() -> argparse.ArgumentParser:
                    help="Application icon file (.ico or .png; PNG files are converted automatically)")
     v.add_argument("--include-package", "--package", dest="include_packages", action="append", default=[],
                    help="Third-party package to include (e.g. --include-package requests)")
+    v.add_argument("--add-data", dest="add_data", action="append", default=[], metavar="SRC;DEST",
+                   help="Bundle a file or folder, PyInstaller style. Repeatable; "
+                        "DEST is relative to the app folder (use '.' for the root). "
+                        'e.g. --add-data "logo.png;." --add-data "assets;images"')
     v.add_argument("--release", action="store_true", default=False,
                    help="Release build: strip debug symbols / PDB, apply max compiler optimizations and Cython speedups")
     v.add_argument("--keep-pdb", action="store_true", default=False,

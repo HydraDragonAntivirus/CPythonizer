@@ -27,7 +27,7 @@ WORK = Path(os.environ.get("CPXP_ZOMBIE_WORK",
                            Path(os.environ.get("TEMP", ".")) / "cpythonizer-zombie-tests"))
 
 PROGRAM = '''\
-import hashlib, sys, os
+import hashlib, os, sys
 
 PAYLOAD = ("license=" * 9973).encode()
 TABLE = {}
@@ -35,10 +35,19 @@ for i in range(4096):
     TABLE[i] = (i * 2654435761) % 0xFFFFFFFF
 digest = hashlib.sha256(PAYLOAD).hexdigest()
 checksum = sum(TABLE[i] * (i + 1) for i in range(0, 4096, 7)) % 0xFFFFFFFF
-print("ZPROBE", digest, checksum, len(sys.modules) > 0, os.name)
+# --add-data: read it the PyInstaller way, so this also proves sys._MEIPASS
+# points at the folder the loader extracted the runtime into.
+BASE = getattr(sys, "_MEIPASS", os.path.dirname(sys.executable))
+try:
+    with open(os.path.join(BASE, "probe.dat"), "rb") as fh:
+        data_size = len(fh.read())
+except OSError:
+    data_size = -1
+print("ZPROBE", digest, checksum, len(sys.modules) > 0, os.name, data_size)
 '''
 
 MARKER = "ZPROBE"
+DATA_BYTES = 4096
 
 
 # --------------------------------------------------------------------------
@@ -126,6 +135,19 @@ def _log(res) -> str:
     return res.stdout + res.stderr
 
 
+def _data_size(output: str) -> int:
+    """The last field of the ZPROBE line is the size of the --add-data file."""
+    for line in output.splitlines():
+        if line.startswith(MARKER):
+            parts = line.split()
+            if len(parts) >= 6:
+                try:
+                    return int(parts[-1])
+                except ValueError:
+                    return -2
+    return -1
+
+
 def _temp_folder_of(output: str) -> Path | None:
     for line in output.splitlines():
         if line.startswith("[cpythonizer] temp folder:"):
@@ -148,20 +170,24 @@ def check() -> list[str]:
     WORK.mkdir(parents=True, exist_ok=True)
     src = WORK / "probe.py"
     src.write_text(PROGRAM, encoding="utf-8")
+    data = WORK / "probe.dat"
+    data.write_bytes(b"add-data-payload" * (DATA_BYTES // 16 + 1))
+    add_data = ["--add-data", f"{data};."]
     bad: list[str] = []
 
-    plain = _build("ZPlain", src, ["--release"])
+    plain = _build("ZPlain", src, ["--release", *add_data])
     guarded = _build("ZGuard", src, ["--zombie", "--guard", "full", "--lzma2",
-                                     "--release"])
+                                     "--release", *add_data])
     noad = _build("ZNoAd", src, ["--zombie", "--guard", "full", "--lzma2",
-                                 "--release", "--no-antidump"])
+                                 "--release", "--no-antidump", *add_data])
     off = _build("ZGuardOff", src, ["--zombie", "--guard", "off", "--lzma2",
-                                    "--release"])
+                                    "--release", *add_data])
 
     # 1. the program itself must behave identically, protected or not
     base = _runs(plain, 2)[0][1]
     if MARKER not in base:
         bad.append(f"plain build did not run the program: {base[:200]!r}")
+    want_size = data.stat().st_size
     for name, exe in (("zombie guard full", guarded), ("zombie no-antidump", noad),
                       ("zombie guard off", off)):
         runs = _runs(exe, 3)
@@ -172,6 +198,18 @@ def check() -> list[str]:
                 bad.append(f"{name} run {i}: output differs from the plain build\n"
                            f"  plain : {base.strip()[:200]}\n"
                            f"  zombie: {out.strip()[:200]}")
+
+    # 1b. --add-data must actually be reachable at run time, in every mode.
+    #     Comparing against the plain build above is not enough on its own: if
+    #     the file were missing everywhere, all four outputs would still match.
+    for name, out in (("plain", base),
+                      ("zombie guard full", _execute(guarded).stdout),
+                      ("zombie no-antidump", _execute(noad).stdout),
+                      ("zombie guard off", _execute(off).stdout)):
+        got = _data_size(out)
+        if got != want_size:
+            bad.append(f"{name}: --add-data file read back as {got} bytes, "
+                       f"expected {want_size} (sys._MEIPASS lookup)")
 
     # 2. VERBOSE=1 must actually print diagnostics and still succeed. This is the
     #    check that used to be missing: the loader crashed only on this path.
