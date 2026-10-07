@@ -319,16 +319,19 @@ def parse_add_data(specs: list[str] | None) -> list[tuple[Path, Path]]:
     out: list[tuple[Path, Path]] = []
     for spec in specs or []:
         text = str(spec)
+        needs_sep = (f"--add-data needs SOURCE;DEST, got {spec!r} "
+                     f'(e.g. --add-data "logo.png;.")')
         if ";" in text:
             src, _, dest = text.rpartition(";")
-        elif ":" in text[1:]:
-            # A Windows source carries its own colon ("C:\\img.png"), so the
-            # separator has to be the last one, not the first.
-            src, _, dest = text.rpartition(":")
         else:
-            raise ValueError(
-                f"--add-data needs SOURCE;DEST, got {spec!r} "
-                f'(e.g. --add-data "logo.png;.")')
+            # A Windows source carries its own colon ("C:\\img.png"), so only a
+            # colon past the drive letter is the separator. A path without one
+            # is a forgotten separator, and splitting it anyway would report the
+            # baffling "source not found: C".
+            after_drive = text[2:] if text[1:2] == ":" else text
+            if ":" not in after_drive:
+                raise ValueError(needs_sep)
+            src, _, dest = text.rpartition(":")
         src_p = Path(src.strip()).expanduser()
         dest_p = Path(dest.strip() or ".")
         if not src_p.exists():
